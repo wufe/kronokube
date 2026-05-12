@@ -727,8 +727,13 @@ func (m Model) renderHeader() string {
 		StyleMuted.Render("ns: " + nsLabel(m.namespace)),
 		StyleMuted.Render("file: " + shortFile(file)),
 	}
-	if m.live {
+	// Time indicator: wall clock when actively following live; otherwise the
+	// timestamp of the snapshot we're displaying, so the header agrees with
+	// the data on screen.
+	if m.live && m.follow {
 		parts = append(parts, StyleMuted.Render(time.Now().Format("15:04:05")))
+	} else if len(m.snapshots) > 0 && m.curSnap < len(m.snapshots) {
+		parts = append(parts, StyleMuted.Render("at: "+m.snapshots[m.curSnap].Timestamp.Format("15:04:05")))
 	}
 	return strings.Join(parts, "  ")
 }
