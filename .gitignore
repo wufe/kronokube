@@ -1,0 +1,8 @@
+/kk
+/kk.exe
+/dist/
+*.kk
+*.kk-journal
+*.kk-shm
+*.kk-wal
+.kube/

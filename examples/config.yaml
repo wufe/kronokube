@@ -1,0 +1,34 @@
+# KronoKube — sample config.
+#
+# Every field is optional. CLI flags override values here.
+
+# Snapshot cadence. Default 30s.
+interval: 30s
+
+# kubeconfig context to bind this recording to. Defaults to the current context.
+# context: my-cluster
+
+# Path to kubeconfig. Defaults to $KUBECONFIG or ~/.kube/config.
+# kubeconfig: /home/me/.kube/config
+
+# Default output file. Overridden by --out on the CLI.
+# output: ./incident-2026-05-12.kk
+
+# Namespaces to capture. Empty list = all accessible namespaces.
+# include_namespaces:
+#   - default
+#   - my-app
+
+# Namespaces to skip (applied after include_namespaces).
+# exclude_namespaces:
+#   - kube-system
+
+# Pod log capture. OFF by default — logs can be large and may contain
+# sensitive data. When enabled, KronoKube runs
+#   kubectl logs <pod> -n <ns> --all-containers=true --prefix=true --tail=N
+# for every captured pod, after the structured snapshot pass.
+#
+# pod_logs:
+#   enabled: true
+#   tail_lines: 100          # per-container tail (default 100)
+#   per_pod_timeout: 5s      # bound a single log fetch (default 5s)
