@@ -21,6 +21,7 @@ type KeyMap struct {
 	Events      key.Binding
 	Timeline    key.Binding
 	Logs        key.Binding
+	YAML        key.Binding
 	Back        key.Binding
 	PrevSnap    key.Binding
 	NextSnap    key.Binding
@@ -49,6 +50,7 @@ func DefaultKeyMap() KeyMap {
 		Events:      key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "events")),
 		Timeline:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "changes timeline")),
 		Logs:        key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "pod logs")),
+		YAML:        key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yaml of resource")),
 		Back:        key.NewBinding(key.WithKeys("esc", "backspace"), key.WithHelp("esc", "back")),
 		PrevSnap:    key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "prev snap")),
 		NextSnap:    key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "next snap")),

@@ -32,6 +32,7 @@ const (
 	viewEvents
 	viewChangeTimeline
 	viewLogs
+	viewYAML
 	viewHelp
 	viewNamespacePicker
 )
@@ -250,6 +251,16 @@ func loadEventsCmd(s *store.Store, uid string, snapID int64, kind model.Kind, ns
 	}
 }
 
+func loadYAMLCmd(s *store.Store, snapID int64, kind model.Kind, ns, name string) tea.Cmd {
+	return func() tea.Msg {
+		raw, err := s.FetchRaw(snapID, kind, ns, name)
+		if err != nil {
+			return errMsg{err}
+		}
+		return detailLoadedMsg{view: viewYAML, content: renderResourceYAML(kind, ns, name, raw)}
+	}
+}
+
 func loadLogsCmd(s *store.Store, snapID int64, ns, pod string) tea.Cmd {
 	return func() tea.Msg {
 		pl, err := s.FetchPodLog(snapID, ns, pod)
@@ -451,8 +462,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Detail views (describe/events/timeline/logs) accept scroll + back.
-	if m.view == viewDescribe || m.view == viewEvents || m.view == viewChangeTimeline || m.view == viewLogs {
+	// Detail views (describe/events/timeline/logs/yaml) accept scroll + back.
+	if m.view == viewDescribe || m.view == viewEvents || m.view == viewChangeTimeline || m.view == viewLogs || m.view == viewYAML {
 		switch {
 		case key.Matches(msg, k.Quit):
 			return m.quit()
@@ -611,6 +622,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Non-pod selection: flash a hint rather than silently doing nothing.
 		m.statusFlash = "logs view: select a pod"
 		m.flashUntil = time.Now().Add(2 * time.Second)
+	case key.Matches(msg, k.YAML):
+		if r := m.currentRow(); r != nil {
+			m.captureSelection(*r)
+			return m, loadYAMLCmd(m.store, m.snapshots[m.curSnap].ID, r.Kind, r.Namespace, r.Name)
+		}
 	}
 	return m, nil
 }
@@ -647,7 +663,7 @@ func (m Model) View() string {
 	switch m.view {
 	case viewHelp:
 		return m.renderHelp()
-	case viewDescribe, viewEvents, viewChangeTimeline, viewLogs:
+	case viewDescribe, viewEvents, viewChangeTimeline, viewLogs, viewYAML:
 		return m.renderDetail()
 	case viewNamespacePicker:
 		return m.renderNamespacePicker()
@@ -753,7 +769,7 @@ func shortFile(p string) string {
 }
 
 func (m Model) renderStatus() string {
-	help := "tab: kind  /: filter  enter: describe  e: events  t: changes  o: logs  n: ns  ←/→: scrub  L: live  ?: help  q: quit"
+	help := "tab: kind  /: filter  enter: describe  y: yaml  e: events  t: changes  o: logs  n: ns  ←/→: scrub  L: live  ?: help  q: quit"
 	if time.Now().Before(m.flashUntil) && m.statusFlash != "" {
 		return StyleOK.Render(m.statusFlash) + "  " + StyleMuted.Render(help)
 	}
@@ -781,6 +797,8 @@ func (m Model) renderDetail() string {
 		title = "Changes Timeline"
 	case viewLogs:
 		title = "Pod Logs"
+	case viewYAML:
+		title = "YAML"
 	}
 	header := StyleTitle.Render(fmt.Sprintf("%s — %s/%s", title, m.selNamespace, m.selName))
 	body := m.detail
@@ -872,6 +890,7 @@ TIMELINE (REPLAY)
 
 INSPECT
   enter / d         describe selected resource
+  y                 raw YAML of selected resource (from captured data)
   e                 events for selected resource (across all snapshots)
   t                 changes timeline for selected resource
   o                 pod logs at this snapshot (when pod_logs.enabled in config)

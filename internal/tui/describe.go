@@ -141,6 +141,74 @@ func writeEvents(b *strings.Builder, events []model.Event) {
 	}
 }
 
+// renderResourceYAML pretty-prints the captured JSON of a resource as YAML.
+// Top-level keys are ordered the way kubectl get -o yaml prints them
+// (apiVersion, kind, metadata, spec, status, then anything else), so the
+// output is easy to read alongside a real kubectl session. Nested keys are
+// alphabetical, which is yaml.v3's default — close enough for debugging.
+func renderResourceYAML(kind model.Kind, ns, name string, raw []byte) string {
+	var b strings.Builder
+	b.WriteString(StyleTitle.Render(fmt.Sprintf("YAML — %s  %s/%s", kind, ns, name)))
+	b.WriteString("\n\n")
+	if len(raw) == 0 {
+		b.WriteString(StyleMuted.Render("(no captured data for this resource at this snapshot)"))
+		return b.String()
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		b.WriteString(StyleError.Render("cannot decode resource JSON: " + err.Error()))
+		return b.String()
+	}
+	out, err := marshalKubectlYAML(obj)
+	if err != nil {
+		b.WriteString(StyleError.Render("yaml marshal: " + err.Error()))
+		return b.String()
+	}
+	b.Write(out)
+	return b.String()
+}
+
+// kubectlYAMLOrder is the top-level key sequence kubectl uses in -o yaml.
+var kubectlYAMLOrder = []string{"apiVersion", "kind", "metadata", "spec", "status"}
+
+func marshalKubectlYAML(obj map[string]any) ([]byte, error) {
+	// Build a yaml.Node mapping with explicit key order.
+	root := &yaml.Node{Kind: yaml.MappingNode}
+	emitted := map[string]bool{}
+	for _, k := range kubectlYAMLOrder {
+		if v, ok := obj[k]; ok {
+			if err := appendKV(root, k, v); err != nil {
+				return nil, err
+			}
+			emitted[k] = true
+		}
+	}
+	// Remaining keys in alphabetical order for determinism.
+	rest := make([]string, 0, len(obj))
+	for k := range obj {
+		if !emitted[k] {
+			rest = append(rest, k)
+		}
+	}
+	sort.Strings(rest)
+	for _, k := range rest {
+		if err := appendKV(root, k, obj[k]); err != nil {
+			return nil, err
+		}
+	}
+	return yaml.Marshal(root)
+}
+
+func appendKV(parent *yaml.Node, key string, value any) error {
+	kn := &yaml.Node{Kind: yaml.ScalarNode, Value: key}
+	vn := &yaml.Node{}
+	if err := vn.Encode(value); err != nil {
+		return err
+	}
+	parent.Content = append(parent.Content, kn, vn)
+	return nil
+}
+
 func str(v any) string {
 	if s, ok := v.(string); ok {
 		return s
