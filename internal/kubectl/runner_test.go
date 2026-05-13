@@ -84,3 +84,30 @@ func TestValidate_EmptyArgv(t *testing.T) {
 		t.Errorf("Validate(nil) = nil, want error")
 	}
 }
+
+func TestValidateStreamingLogs_AllowsFollow(t *testing.T) {
+	cases := [][]string{
+		{"logs", "p1", "-n", "default", "--all-containers=true", "--prefix=true", "--tail=3000", "-f"},
+		{"logs", "p1", "--follow"},
+	}
+	for _, c := range cases {
+		if err := ValidateStreamingLogs(c); err != nil {
+			t.Errorf("ValidateStreamingLogs(%v) = %v, want nil", c, err)
+		}
+	}
+}
+
+func TestValidateStreamingLogs_StillRejectsWrites(t *testing.T) {
+	cases := [][]string{
+		{"apply", "-f", "x.yaml"},
+		{"delete", "pod", "foo"},
+		{"exec", "-it", "pod", "--", "sh"},
+		{"get", "pods", "--force"},
+		{"logs", "p1", "--grace-period=0"},
+	}
+	for _, c := range cases {
+		if err := ValidateStreamingLogs(c); err == nil {
+			t.Errorf("ValidateStreamingLogs(%v) = nil, want error", c)
+		}
+	}
+}

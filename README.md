@@ -136,12 +136,22 @@ the freed space is returned to the filesystem.
 - **Pod logs** — off by default. Enable with `pod_logs.enabled: true` in
   config (see `examples/config.yaml`); KronoKube then fetches a per-container
   tail (default 100 lines) for every captured pod, using
-  `kubectl logs --all-containers --prefix --tail=N`. Streaming
-  (`-f`/`--follow`) is rejected by the allowlist so a stuck log can't stall
-  the snapshot. Logs can contain sensitive data, hence the toggle. In the
-  TUI, the pod-logs view shows the captured tail as-is; if
-  [loglens](https://github.com/wufe/loglens) is on `$PATH`, press **enter**
-  to hand the bytes to loglens for a richer browse session.
+  `kubectl logs --all-containers --prefix --tail=N`. The snapshotter never
+  uses `-f`/`--follow` (the standard allowlist still rejects it) so a stuck
+  log can't stall a tick. Logs can contain sensitive data, hence the toggle.
+
+  In the TUI, the pod-logs view shows the captured tail as-is. While
+  **recording** and at the head of the timeline (the "LIVE" indicator,
+  follow on), pressing **l** instead starts a `kubectl logs -f` stream and
+  shows it in place — last 3000 lines are kept in memory (oldest dropped on
+  overflow); pausing the timeline reverts to the captured snapshot on the
+  next open. Streaming uses a separate, narrowly-scoped validator
+  (`kubectl.ValidateStreamingLogs`); `kk safety` prints both validators so
+  the carve-out stays auditable. If [loglens](https://github.com/wufe/loglens)
+  is on `$PATH`, press **enter** to hand the bytes off — for a captured
+  tail loglens gets a static slice; from the live stream it gets a fresh
+  `kubectl logs -f` of its own (kk's stream is paused, then resumed when
+  loglens exits).
 
 When a resource kind is forbidden by RBAC, KronoKube records the denial as
 part of the snapshot and continues. Partial captures are honest, not silent.

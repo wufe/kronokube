@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 )
@@ -67,8 +68,23 @@ func (r *Runner) Exec(ctx context.Context, argv []string) ([]byte, error) {
 }
 
 // Validate is the safety check. Pure function so it can be unit-tested
-// without spawning processes.
+// without spawning processes. Rejects every write-shaped argv AND streaming
+// flags (`-f` / `--follow`); use ValidateStreamingLogs for the one path
+// where streaming is permitted.
 func Validate(argv []string) error {
+	return validate(argv, false)
+}
+
+// ValidateStreamingLogs is the narrowed variant used by Runner.LogsStream.
+// It performs the same checks as Validate except it permits the streaming
+// flags. Only the live-tail entry point in this package may call it; the
+// snapshotter still goes through Validate so a stuck stream can never stall
+// a snapshot tick.
+func ValidateStreamingLogs(argv []string) error {
+	return validate(argv, true)
+}
+
+func validate(argv []string, allowFollow bool) error {
 	if len(argv) == 0 {
 		return &forbiddenReason{reason: "empty argv"}
 	}
@@ -110,6 +126,13 @@ func Validate(argv []string) error {
 			// Match as a whole token or as a prefix of a flag, e.g. "--force=true".
 			if la == bad || strings.HasPrefix(la, bad+"=") {
 				return &forbiddenReason{reason: fmt.Sprintf("argument %q contains forbidden token %q", a, bad)}
+			}
+		}
+		if !allowFollow {
+			for _, bad := range forbiddenStreamingTokens {
+				if la == bad || strings.HasPrefix(la, bad+"=") {
+					return &forbiddenReason{reason: fmt.Sprintf("argument %q contains forbidden token %q", a, bad)}
+				}
 			}
 		}
 	}
@@ -189,6 +212,62 @@ func (r *Runner) Logs(ctx context.Context, namespace, pod string, tailLines int)
 		"--ignore-errors=true",
 	}
 	return r.Exec(ctx, args)
+}
+
+// LogsStreamCmd builds the exec.Cmd for `kubectl logs -f` against one pod.
+// The caller is expected to wire Stdout (and optionally Stderr) before Start.
+// Cancelling ctx terminates the stream. This is the only place in the program
+// that's allowed to pass --follow; the path runs through ValidateStreamingLogs
+// so the safety contract still controls every other token.
+func (r *Runner) LogsStreamCmd(ctx context.Context, namespace, pod string, tailLines int) (*exec.Cmd, error) {
+	if tailLines <= 0 {
+		tailLines = 3000
+	}
+	args := []string{
+		"logs", pod,
+		"-n", namespace,
+		"--all-containers=true",
+		"--prefix=true",
+		fmt.Sprintf("--tail=%d", tailLines),
+		"--ignore-errors=true",
+		"-f",
+	}
+	if err := ValidateStreamingLogs(args); err != nil {
+		return nil, err
+	}
+	full := append([]string{}, r.extraArgs...)
+	full = append(full, args...)
+	return exec.CommandContext(ctx, r.binary, full...), nil
+}
+
+// LogsStream starts `kubectl logs -f` and returns a reader over its stdout.
+// Stderr is captured into a small buffer so the caller can surface kubectl's
+// own error after the stream closes (e.g. RBAC denial, pod not found). The
+// returned cancel terminates the process and waits for it to exit.
+func (r *Runner) LogsStream(ctx context.Context, namespace, pod string, tailLines int) (io.ReadCloser, *bytes.Buffer, context.CancelFunc, error) {
+	cctx, cancel := context.WithCancel(ctx)
+	cmd, err := r.LogsStreamCmd(cctx, namespace, pod, tailLines)
+	if err != nil {
+		cancel()
+		return nil, nil, nil, err
+	}
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, nil, nil, err
+	}
+	stderr := &bytes.Buffer{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, nil, nil, err
+	}
+	stop := func() {
+		cancel()
+		// Best-effort reap; we don't care about its exit code once cancelled.
+		_ = cmd.Wait()
+	}
+	return pipe, stderr, stop, nil
 }
 
 // CanI checks whether the current credentials may perform a verb on a resource.

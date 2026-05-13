@@ -2,10 +2,14 @@ package tui
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"os/exec"
 	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/wufe/kronokube/internal/kubectl"
 )
 
 // loglens integration is fully optional. KronoKube does not link against
@@ -57,4 +61,58 @@ func spawnLoglens(content []byte) tea.Cmd {
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return loglensExitedMsg{err: err}
 	})
+}
+
+// spawnLoglensLive launches loglens against a continuously-streaming pod log.
+// The kk TUI's own kubectl stream is expected to be stopped by the caller
+// before this runs; we start a fresh `kubectl logs -f` and feed it (plus
+// the snapshot the user was already seeing) into loglens stdin. Loglens
+// thus shows the same history followed by ongoing lines as they arrive.
+//
+// Returns:
+//   - cmd, nil    : a tea.Cmd that suspends kk until loglens exits
+//   - nil, nil    : loglens is not on PATH
+//   - nil, err    : kubectl invocation failed validation or exec
+//
+// kubectl is reaped when loglens exits, regardless of how it exited.
+func spawnLoglensLive(runner *kubectl.Runner, ns, pod string, snapshot []byte) (tea.Cmd, error) {
+	bin := loglensPath()
+	if bin == "" {
+		return nil, nil
+	}
+	if runner == nil {
+		// Defensive: callers gate on m.live before invoking us.
+		return nil, errLogStreamNoRunner
+	}
+	// Fresh streaming kubectl, separate from the TUI's own. Loglens drives
+	// its lifetime: we kill kubectl in the ExecProcess callback below.
+	kpipe, _, kstop, err := runner.LogsStream(context.Background(), ns, pod, liveLogMaxLines)
+	if err != nil {
+		return nil, err
+	}
+
+	// Loglens stdin gets the snapshot first, then ongoing kubectl output.
+	// io.Pipe gives us a synchronous handoff: loglens reads as fast as it
+	// can, kubectl blocks if it doesn't (back-pressure all the way to the
+	// kernel pipe between us and kubectl). We do *not* try to bound this —
+	// loglens manages its own memory.
+	pr, pw := io.Pipe()
+	go func() {
+		defer pw.Close()
+		if len(snapshot) > 0 {
+			if _, werr := pw.Write(snapshot); werr != nil {
+				return
+			}
+		}
+		_, _ = io.Copy(pw, kpipe)
+	}()
+
+	cmd := exec.Command(bin)
+	cmd.Stdin = pr
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		// Tear down kubectl as soon as loglens is done. The copier goroutine
+		// will see EOF on the kubectl side and exit shortly after.
+		kstop()
+		return loglensExitedMsg{err: err}
+	}), nil
 }

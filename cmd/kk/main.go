@@ -173,7 +173,7 @@ func runRecord(args []string) {
 	}
 
 	// TUI takes over stdout.
-	if err := tui.Run(ctx, st, true, progressCh, cancel); err != nil {
+	if err := tui.Run(ctx, st, true, progressCh, runner, cancel); err != nil {
 		die(err)
 	}
 	cancel()
@@ -198,7 +198,7 @@ func runReplay(args []string) {
 	defer st.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := tui.Run(ctx, st, false, nil, cancel); err != nil {
+	if err := tui.Run(ctx, st, false, nil, nil, cancel); err != nil {
 		die(err)
 	}
 }
@@ -235,6 +235,26 @@ func runSafetyAudit() {
 	}
 	for _, c := range cases {
 		err := kubectl.Validate(c)
+		status := "OK"
+		if err != nil {
+			status = "BLOCKED: " + err.Error()
+		}
+		fmt.Printf("  kubectl %-40s  %s\n", strings.Join(c, " "), status)
+	}
+	fmt.Println()
+	fmt.Println("Streaming carve-out (kubectl.ValidateStreamingLogs):")
+	fmt.Println("  Only the live-tail entry point (Runner.LogsStream) may use")
+	fmt.Println("  -f / --follow. All write-shaped tokens stay blocked.")
+	streamCases := [][]string{
+		{"logs", "p1", "-n", "default", "--all-containers=true", "--prefix=true", "--tail=3000", "-f"},
+		{"logs", "p1", "--follow"},
+		// must still be rejected even under the streaming variant:
+		{"apply", "-f", "x.yaml"},
+		{"delete", "pod", "foo"},
+		{"exec", "-it", "pod", "--", "sh"},
+	}
+	for _, c := range streamCases {
+		err := kubectl.ValidateStreamingLogs(c)
 		status := "OK"
 		if err != nil {
 			status = "BLOCKED: " + err.Error()

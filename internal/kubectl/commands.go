@@ -39,10 +39,14 @@ var forbiddenTokens = []string{
 	"cordon", "uncordon", "drain", "taint",
 	"exec", "attach", "cp", "port-forward", "proxy", "run", "debug", "wait",
 	"--force", "--grace-period",
-	// Streaming flags are read-only but would block the snapshotter
-	// indefinitely. KronoKube always fetches finite tails of logs.
-	"-f", "--follow",
 }
+
+// forbiddenStreamingTokens block `kubectl logs -f / --follow`. They are
+// read-only flags but would stall any caller that expects a finite response.
+// Validate() rejects them; ValidateStreamingLogs() (used by the dedicated
+// Runner.LogsStream entry point) does not — that path is built around a
+// long-running stream and the TUI tears it down on exit.
+var forbiddenStreamingTokens = []string{"-f", "--follow"}
 
 // forbiddenSubcommands enforces that compound verbs only use their read-only
 // sub-forms. E.g. "kubectl config view" is fine; "kubectl config set-context" is not.

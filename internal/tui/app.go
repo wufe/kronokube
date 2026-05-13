@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/wufe/kronokube/internal/capture"
+	"github.com/wufe/kronokube/internal/kubectl"
 	"github.com/wufe/kronokube/internal/model"
 	"github.com/wufe/kronokube/internal/store"
 )
@@ -40,6 +41,7 @@ const (
 // Model is the bubbletea state for the TUI.
 type Model struct {
 	store    *store.Store
+	runner   *kubectl.Runner // non-nil only in live (recording) mode
 	keymap   KeyMap
 	width    int
 	height   int
@@ -108,6 +110,11 @@ type Model struct {
 	// logsTarget is the pod we last loaded logs for. We compare against the
 	// currently selected resource to invalidate logsPL on new selections.
 	logsTarget string
+	// liveLog is non-nil while the logs view is showing a `kubectl logs -f`
+	// stream rather than a captured snapshot. Only ever non-nil in live mode
+	// when the user opened logs while following the head of the timeline.
+	// Torn down on Esc / view switch / quit.
+	liveLog *liveLogStream
 	// pendingG implements the vim 'gg' two-press jump-to-top sequence inside
 	// detail views. Set after a lone 'g'; cleared by the second 'g' (which
 	// triggers the jump) or by any other key.
@@ -139,8 +146,10 @@ type Model struct {
 }
 
 // NewModel constructs a TUI model. progress may be nil for pure replay mode.
+// runner may be nil in replay mode; it is required for live log streaming
+// (used when the user opens logs while following the head of the timeline).
 // cancel may be nil; otherwise it is called on Quit.
-func NewModel(st *store.Store, live bool, progress <-chan capture.Tick, cancel context.CancelFunc) Model {
+func NewModel(st *store.Store, live bool, progress <-chan capture.Tick, runner *kubectl.Runner, cancel context.CancelFunc) Model {
 	ti := textinput.New()
 	ti.Prompt = "/"
 	ti.Placeholder = "filter (regex-free substring)"
@@ -148,6 +157,7 @@ func NewModel(st *store.Store, live bool, progress <-chan capture.Tick, cancel c
 
 	m := Model{
 		store:       st,
+		runner:      runner,
 		keymap:      DefaultKeyMap(),
 		live:        live,
 		progress:    progress,
@@ -535,6 +545,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case logChunkMsg:
+		// Late chunk from a previous pod's stream (user navigated away):
+		// drop it, but keep draining the channel so the goroutine can exit.
+		if m.liveLog == nil || msg.target != m.liveLog.Target() {
+			return m, nil
+		}
+		if msg.done {
+			// Stream ended (kubectl exited or errored). The buffer keeps its
+			// final contents; surface the error in the status bar so the
+			// user knows the view stopped updating.
+			if msg.err != nil {
+				m.statusFlash = "logs stream: " + msg.err.Error()
+			} else {
+				m.statusFlash = "logs stream: closed"
+			}
+			m.flashUntil = time.Now().Add(5 * time.Second)
+			m.detail = renderLiveLogs(m.liveLog.ns, m.liveLog.pod, m.liveLog.Snapshot(), true)
+			return m, nil
+		}
+		m.detail = renderLiveLogs(m.liveLog.ns, m.liveLog.pod, m.liveLog.Snapshot(), false)
+		// Keep the latest lines on-screen by snapping the scroll cursor to
+		// the last page. Without this, the buffer grows past the visible
+		// region and the user sees stale content. detailLastPageStart()
+		// accounts for the wrap setting.
+		m.detailScroll = m.detailLastPageStart()
+		return m, waitForLogChunkCmd(m.liveLog.ch)
+
 	case namespacesLoadedMsg:
 		m.namespaces = append([]string{""}, msg.namespaces...) // "" = all
 		m.nsSel = 0
@@ -556,6 +593,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.statusFlash = "loglens: " + msg.err.Error()
 			m.flashUntil = time.Now().Add(5 * time.Second)
+		}
+		// If we suspended our own live stream to hand kubectl off to
+		// loglens, restart it now so the view resumes updating in place.
+		if m.view == viewLogs && m.live && m.follow && m.runner != nil &&
+			m.liveLog == nil && m.selKind == "pods" && m.selName != "" {
+			return m.beginLiveLogs(m.selNamespace, m.selName)
 		}
 		return m, nil
 
@@ -676,9 +719,29 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.pendingG = false
 
-		// Enter in the logs view hands the captured bytes to loglens (if it's
-		// on PATH). Suspends the kk TUI until loglens exits.
+		// Enter in the logs view hands the bytes to loglens (if it's on
+		// PATH). For a live stream we tear down our own kubectl process and
+		// hand loglens a freshly-started `kubectl logs -f` of its own. For
+		// captured snapshots we just pipe the saved bytes.
 		if m.view == viewLogs && msg.Type == tea.KeyEnter {
+			if m.liveLog != nil {
+				ns, pod := m.liveLog.ns, m.liveLog.pod
+				snap := m.liveLog.Snapshot()
+				m.stopLiveLog()
+				cmd, err := spawnLoglensLive(m.runner, ns, pod, snap)
+				if err != nil {
+					m.statusFlash = "loglens: " + err.Error()
+					m.flashUntil = time.Now().Add(3 * time.Second)
+					// Resume our own stream so the view keeps updating.
+					return m.beginLiveLogs(ns, pod)
+				}
+				if cmd != nil {
+					return m, cmd
+				}
+				m.statusFlash = "loglens binary not found on PATH"
+				m.flashUntil = time.Now().Add(2 * time.Second)
+				return m.beginLiveLogs(ns, pod)
+			}
 			if m.logsPL == nil || len(m.logsPL.Content) == 0 {
 				m.statusFlash = "no log bytes to open"
 				m.flashUntil = time.Now().Add(2 * time.Second)
@@ -696,6 +759,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, k.Quit):
 			return m.quit()
 		case key.Matches(msg, k.Back):
+			m.stopLiveLog()
 			m.view = viewTable
 			return m, nil
 		case key.Matches(msg, k.Down):
@@ -896,6 +960,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.captureSelection(*r)
+			// In live+follow mode start a `kubectl logs -f` stream so the
+			// user sees output as it arrives. In replay (or while paused
+			// mid-history) fall back to the captured snapshot.
+			if m.live && m.follow && m.runner != nil {
+				return m.beginLiveLogs(r.Namespace, r.Name)
+			}
 			return m, loadLogsCmd(m.store, m.snapshots[m.curSnap].ID, r.Namespace, r.Name)
 		}
 		// Non-pod selection: flash a hint rather than silently doing nothing.
@@ -931,6 +1001,7 @@ func (m Model) currentRow() *model.Row {
 }
 
 func (m Model) quit() (tea.Model, tea.Cmd) {
+	m.stopLiveLog()
 	if m.cancel != nil {
 		m.cancel()
 	}
@@ -1332,6 +1403,59 @@ func (m Model) detailLastPageStart() int {
 	return total - visible
 }
 
+// beginLiveLogs starts a `kubectl logs -f` stream for ns/pod, parks the
+// model on viewLogs, and arms the chunk-wait command that drives the live
+// updates. Any existing stream is torn down first so we never have two
+// kubectl processes against the same view.
+func (m Model) beginLiveLogs(ns, pod string) (tea.Model, tea.Cmd) {
+	m.stopLiveLog()
+	ls, err := startLiveLogStream(m.runner, ns, pod)
+	if err != nil {
+		m.statusFlash = "live logs: " + err.Error()
+		m.flashUntil = time.Now().Add(5 * time.Second)
+		// Fall back to captured snapshot so the keypress isn't lost.
+		return m, loadLogsCmd(m.store, m.snapshots[m.curSnap].ID, ns, pod)
+	}
+	m.liveLog = ls
+	m.logsPL = nil
+	m.logsTarget = ns + "/" + pod
+	m.view = viewLogs
+	m.detailScroll = 0
+	m.detail = renderLiveLogs(ns, pod, nil, false)
+	return m, waitForLogChunkCmd(ls.ch)
+}
+
+// stopLiveLog cancels the kubectl streaming process (if any). Safe to call
+// when no stream is active.
+func (m *Model) stopLiveLog() {
+	if m.liveLog == nil {
+		return
+	}
+	m.liveLog.Stop()
+	m.liveLog = nil
+}
+
+// renderLiveLogs formats a streaming buffer for the scrollable detail view.
+// `closed` is set after the kubectl process exits so we can mark the buffer
+// as final instead of "still updating".
+func renderLiveLogs(ns, pod string, content []byte, closed bool) string {
+	var b strings.Builder
+	b.WriteString(StyleTitle.Render(fmt.Sprintf("Logs (live) — %s/%s", ns, pod)))
+	b.WriteString("\n\n")
+	tag := "(streaming — last 3000 lines kept in memory)"
+	if closed {
+		tag = "(stream closed)"
+	}
+	b.WriteString(StyleMuted.Render(tag))
+	b.WriteString("\n\n")
+	if len(content) == 0 {
+		b.WriteString(StyleMuted.Render("<waiting for output…>"))
+		return b.String()
+	}
+	b.Write(content)
+	return b.String()
+}
+
 // renderPodLogs formats the captured log tail as a self-contained string
 // suitable for the scrollable detail view. The raw bytes are kept on the
 // model separately (m.logsPL) so the "open in loglens" subprocess path can
@@ -1542,9 +1666,10 @@ func max0(n int) int {
 	return n
 }
 
-// Run is the public entry point used by main.
-func Run(ctx context.Context, st *store.Store, live bool, progress <-chan capture.Tick, cancel context.CancelFunc) error {
-	m := NewModel(st, live, progress, cancel)
+// Run is the public entry point used by main. runner may be nil for replay
+// mode; it is required for the live-log-stream behavior in record mode.
+func Run(ctx context.Context, st *store.Store, live bool, progress <-chan capture.Tick, runner *kubectl.Runner, cancel context.CancelFunc) error {
+	m := NewModel(st, live, progress, runner, cancel)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	if errors.Is(err, tea.ErrProgramKilled) {
