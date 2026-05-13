@@ -35,6 +35,15 @@ Or build from a local checkout:
 
     go build -o kk ./cmd/kk
 
+### Optional: loglens for log inspection
+
+If [loglens](https://github.com/wufe/loglens) is on your `$PATH`, the pod-logs
+view shows an "open in loglens" hint and pressing **enter** suspends `kk`,
+hands the captured log bytes to loglens (cursor, search, JSON expand, all of
+its keybindings), and returns to `kk` when you quit loglens. KronoKube
+doesn't depend on loglens at build time — the feature is detected at runtime
+and silently disabled if the binary isn't found.
+
 ## Usage
 
     # record (TUI)
@@ -105,7 +114,10 @@ Skipped intentionally:
   tail (default 100 lines) for every captured pod, using
   `kubectl logs --all-containers --prefix --tail=N`. Streaming
   (`-f`/`--follow`) is rejected by the allowlist so a stuck log can't stall
-  the snapshot. Logs can contain sensitive data, hence the toggle.
+  the snapshot. Logs can contain sensitive data, hence the toggle. In the
+  TUI, the pod-logs view shows the captured tail as-is; if
+  [loglens](https://github.com/wufe/loglens) is on `$PATH`, press **enter**
+  to hand the bytes to loglens for a richer browse session.
 
 When a resource kind is forbidden by RBAC, KronoKube records the denial as
 part of the snapshot and continues. Partial captures are honest, not silent.

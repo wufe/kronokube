@@ -79,10 +79,17 @@ type Model struct {
 	detail        string
 	detailScroll  int
 	prevView      viewKind
-	// logsWrap toggles hard line-wrapping inside the logs view. Off by
-	// default because raw log output is easier to compare side-by-side with
-	// other terminals when it isn't reflowed.
+	// logsWrap toggles wrapping inside the logs view. Off by default because
+	// raw log output is easier to compare side-by-side with other terminals
+	// when it isn't reflowed.
 	logsWrap bool
+	// logsPL is the captured pod log for the resource currently open in the
+	// logs view. Stored as the structured record so renderDetail can call
+	// loglens at View time with the live terminal width.
+	logsPL *model.PodLog
+	// logsTarget is the pod we last loaded logs for. We compare against the
+	// currently selected resource to invalidate logsPL on new selections.
+	logsTarget string
 	// pendingG implements the vim 'gg' two-press jump-to-top sequence inside
 	// detail views. Set after a lone 'g'; cleared by the second 'g' (which
 	// triggers the jump) or by any other key.
@@ -174,6 +181,13 @@ type detailLoadedMsg struct {
 	content string
 	events  []model.Event
 	changes []store.SnapshotInfo
+	// podLog is set when view == viewLogs. We carry the raw bytes through to
+	// the model so rendering can happen at View time (loglens output depends
+	// on terminal width, which may not be known at load time).
+	podLog *model.PodLog
+	// podLogTarget is "<ns>/<pod>" so the model can compare against the
+	// currently-selected resource and invalidate stale data after navigation.
+	podLogTarget string
 }
 
 type namespacesLoadedMsg struct {
@@ -275,7 +289,12 @@ func loadLogsCmd(s *store.Store, snapID int64, ns, pod string) tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
-		return detailLoadedMsg{view: viewLogs, content: renderPodLogs(ns, pod, pl)}
+		return detailLoadedMsg{
+			view:         viewLogs,
+			content:      renderPodLogs(ns, pod, pl),
+			podLog:       pl,
+			podLogTarget: ns + "/" + pod,
+		}
 	}
 }
 
@@ -368,6 +387,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.changeList = msg.changes
 			m.changeSel = 0
 		}
+		if msg.view == viewLogs {
+			m.logsPL = msg.podLog
+			m.logsTarget = msg.podLogTarget
+		}
 		return m, nil
 
 	case namespacesLoadedMsg:
@@ -385,6 +408,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.statusFlash = "error: " + msg.err.Error()
 		m.flashUntil = time.Now().Add(5 * time.Second)
+		return m, nil
+
+	case loglensExitedMsg:
+		if msg.err != nil {
+			m.statusFlash = "loglens: " + msg.err.Error()
+			m.flashUntil = time.Now().Add(5 * time.Second)
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -490,6 +520,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pendingG = false
+
+		// Enter in the logs view hands the captured bytes to loglens (if it's
+		// on PATH). Suspends the kk TUI until loglens exits.
+		if m.view == viewLogs && msg.Type == tea.KeyEnter {
+			if m.logsPL == nil || len(m.logsPL.Content) == 0 {
+				m.statusFlash = "no log bytes to open"
+				m.flashUntil = time.Now().Add(2 * time.Second)
+				return m, nil
+			}
+			if cmd := spawnLoglens(m.logsPL.Content); cmd != nil {
+				return m, cmd
+			}
+			m.statusFlash = "loglens binary not found on PATH"
+			m.flashUntil = time.Now().Add(2 * time.Second)
+			return m, nil
+		}
 
 		switch {
 		case key.Matches(msg, k.Quit):
@@ -873,7 +919,11 @@ func (m Model) renderDetail() string {
 		if m.logsWrap {
 			wrapState = "on"
 		}
-		footerText = fmt.Sprintf("line %d/%d   ↑↓ scroll   gg/G: top/bottom   w: wrap (%s)   esc: back   q: quit", start+1, len(lines), wrapState)
+		ll := ""
+		if loglensPath() != "" {
+			ll = "   enter: open in loglens"
+		}
+		footerText = fmt.Sprintf("line %d/%d   ↑↓ scroll   gg/G: top/bottom   w: wrap (%s)%s   esc: back   q: quit", start+1, len(lines), wrapState, ll)
 	}
 	footer := StyleMuted.Render(footerText)
 	return header + "\n\n" + body + "\n" + footer
@@ -960,6 +1010,7 @@ INSPECT
   t                 changes timeline for selected resource
   o                 pod logs at this snapshot (when pod_logs.enabled in config)
   w                 toggle line wrap inside the logs view
+  enter             open the current log tail in loglens (if loglens is on PATH)
   gg / G            (inside detail views) jump to first / last line
 
 OTHER
@@ -1008,35 +1059,6 @@ func renderEventsList(kind model.Kind, ns, name string, events []model.Event) st
 	return b.String()
 }
 
-// renderPodLogs formats the captured log tail for a pod. Nil means no record
-// exists for this snapshot (either capture is disabled, or the pod wasn't
-// present at this tick).
-func renderPodLogs(ns, pod string, pl *model.PodLog) string {
-	var b strings.Builder
-	b.WriteString(StyleTitle.Render(fmt.Sprintf("Logs — %s/%s", ns, pod)))
-	b.WriteString("\n\n")
-	if pl == nil {
-		b.WriteString(StyleMuted.Render("No logs captured for this pod at this snapshot."))
-		b.WriteString("\n\n")
-		b.WriteString(StyleMuted.Render("Enable in config:") + "\n")
-		b.WriteString("  pod_logs:\n    enabled: true\n    tail_lines: 100\n")
-		return b.String()
-	}
-	if pl.ErrorMsg != "" {
-		b.WriteString(StyleWarn.Render("capture error: " + pl.ErrorMsg))
-		b.WriteString("\n\n")
-	}
-	fmt.Fprintf(&b, "%s tail_lines=%d   bytes=%d\n\n",
-		StyleMuted.Render("(per container, prefixed by [pod/container])"),
-		pl.TailLines, len(pl.Content))
-	if len(pl.Content) == 0 {
-		b.WriteString(StyleMuted.Render("<no output>"))
-		return b.String()
-	}
-	b.Write(pl.Content)
-	return b.String()
-}
-
 // renderChangeTimeline lists snapshots in which this resource visibly changed.
 func renderChangeTimeline(kind model.Kind, ns, name string, changes []store.SnapshotInfo) string {
 	var b strings.Builder
@@ -1074,6 +1096,36 @@ func (m Model) detailLastPageStart() int {
 		return 0
 	}
 	return total - visible
+}
+
+// renderPodLogs formats the captured log tail as a self-contained string
+// suitable for the scrollable detail view. The raw bytes are kept on the
+// model separately (m.logsPL) so the "open in loglens" subprocess path can
+// pipe them without re-fetching from the store.
+func renderPodLogs(ns, pod string, pl *model.PodLog) string {
+	var b strings.Builder
+	b.WriteString(StyleTitle.Render(fmt.Sprintf("Logs — %s/%s", ns, pod)))
+	b.WriteString("\n\n")
+	if pl == nil {
+		b.WriteString(StyleMuted.Render("No logs captured for this pod at this snapshot."))
+		b.WriteString("\n\n")
+		b.WriteString(StyleMuted.Render("Enable in config:") + "\n")
+		b.WriteString("  pod_logs:\n    enabled: true\n    tail_lines: 100\n")
+		return b.String()
+	}
+	if pl.ErrorMsg != "" {
+		b.WriteString(StyleWarn.Render("capture error: " + pl.ErrorMsg))
+		b.WriteString("\n\n")
+	}
+	fmt.Fprintf(&b, "%s tail_lines=%d   bytes=%d\n\n",
+		StyleMuted.Render("(per container, prefixed by [pod/container])"),
+		pl.TailLines, len(pl.Content))
+	if len(pl.Content) == 0 {
+		b.WriteString(StyleMuted.Render("<no output>"))
+		return b.String()
+	}
+	b.Write(pl.Content)
+	return b.String()
 }
 
 // jumpSnap moves the timeline cursor by delta snapshots, clamps to range,
