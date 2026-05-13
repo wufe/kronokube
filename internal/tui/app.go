@@ -79,6 +79,10 @@ type Model struct {
 	detail        string
 	detailScroll  int
 	prevView      viewKind
+	// logsWrap toggles hard line-wrapping inside the logs view. Off by
+	// default because raw log output is easier to compare side-by-side with
+	// other terminals when it isn't reflowed.
+	logsWrap bool
 
 	// Namespace picker
 	namespaces []string
@@ -493,6 +497,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.detailScroll = 0
 			}
 			return m, nil
+		case key.Matches(msg, k.Wrap) && m.view == viewLogs:
+			m.logsWrap = !m.logsWrap
+			// Re-anchor scroll so the same content stays in view after the
+			// line-count changes due to wrapping.
+			m.detailScroll = 0
+			return m, nil
 		case msg.Type == tea.KeyEnter && m.view == viewChangeTimeline:
 			// Jump to the selected change point in the main timeline.
 			if len(m.changeList) > 0 {
@@ -794,6 +804,11 @@ func (m Model) renderDetail() string {
 	}
 	header := StyleTitle.Render(fmt.Sprintf("%s — %s/%s", title, m.selNamespace, m.selName))
 	body := m.detail
+	// Hard-wrap log content when the user has toggled wrap on. We pre-wrap
+	// before splitting so the scroll/page math below counts visual lines.
+	if m.view == viewLogs && m.logsWrap && m.width > 0 {
+		body = hardWrap(body, m.width)
+	}
 	lines := strings.Split(body, "\n")
 	start := m.detailScroll
 	if start >= len(lines) {
@@ -828,8 +843,40 @@ func (m Model) renderDetail() string {
 	}
 
 	body = strings.Join(lines[start:end], "\n")
-	footer := StyleMuted.Render(fmt.Sprintf("line %d/%d   ↑↓ scroll   esc: back   q: quit", start+1, len(lines)))
+	footerText := fmt.Sprintf("line %d/%d   ↑↓ scroll   esc: back   q: quit", start+1, len(lines))
+	if m.view == viewLogs {
+		wrapState := "off"
+		if m.logsWrap {
+			wrapState = "on"
+		}
+		footerText = fmt.Sprintf("line %d/%d   ↑↓ scroll   w: wrap (%s)   esc: back   q: quit", start+1, len(lines), wrapState)
+	}
+	footer := StyleMuted.Render(footerText)
 	return header + "\n\n" + body + "\n" + footer
+}
+
+// hardWrap splits any line in s that's longer than width into chunks of
+// width runes. Existing newlines are preserved. The result has no trailing
+// newline. Plain rune slicing — fine for raw log output (no ANSI escapes
+// to worry about coming from kubectl --prefix --tail).
+func hardWrap(s string, width int) string {
+	if width < 1 {
+		return s
+	}
+	var b strings.Builder
+	for i, line := range strings.Split(s, "\n") {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		r := []rune(line)
+		for len(r) > width {
+			b.WriteString(string(r[:width]))
+			b.WriteByte('\n')
+			r = r[width:]
+		}
+		b.WriteString(string(r))
+	}
+	return b.String()
 }
 
 func (m Model) renderNamespacePicker() string {
@@ -888,6 +935,7 @@ INSPECT
   e                 events for selected resource (across all snapshots)
   t                 changes timeline for selected resource
   o                 pod logs at this snapshot (when pod_logs.enabled in config)
+  w                 toggle line wrap inside the logs view
 
 OTHER
   ?                 help
