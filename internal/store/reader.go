@@ -64,7 +64,7 @@ func (s *Store) SnapshotStatuses(snapID int64) (map[model.Kind]model.KindStatus,
 // from the stored JSON. RawJSON is left nil here for cheapness — call FetchRaw
 // when you actually need it (describe view).
 func (s *Store) ResourcesForKind(snapID int64, kind model.Kind, namespace string) ([]model.Row, error) {
-	q := `SELECT namespace, name, uid, cells_json FROM resources WHERE snapshot_id=? AND kind=?`
+	q := `SELECT namespace, name, uid, cells_json, shrunk FROM resources WHERE snapshot_id=? AND kind=?`
 	args := []any{snapID, string(kind)}
 	if namespace != "" {
 		q += ` AND namespace=?`
@@ -80,10 +80,12 @@ func (s *Store) ResourcesForKind(snapID int64, kind model.Kind, namespace string
 	for rows.Next() {
 		var r model.Row
 		var cellsJSON string
-		if err := rows.Scan(&r.Namespace, &r.Name, &r.UID, &cellsJSON); err != nil {
+		var shrunk int
+		if err := rows.Scan(&r.Namespace, &r.Name, &r.UID, &cellsJSON, &shrunk); err != nil {
 			return nil, err
 		}
 		r.Kind = kind
+		r.Shrunk = shrunk != 0
 		if err := json.Unmarshal([]byte(cellsJSON), &r.Cells); err != nil {
 			return nil, fmt.Errorf("decode cells: %w", err)
 		}

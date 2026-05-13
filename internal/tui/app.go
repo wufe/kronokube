@@ -864,6 +864,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, loadNamespacesCmd(m.store)
 	case key.Matches(msg, k.Describe):
 		if r := m.currentRow(); r != nil {
+			if r.Shrunk {
+				m.flashShrunk("describe")
+				return m, nil
+			}
 			m.captureSelection(*r)
 			return m, loadDescribeCmd(m.store, m.snapshots[m.curSnap].ID, r.Kind, r.Namespace, r.Name, r.UID)
 		}
@@ -874,11 +878,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case key.Matches(msg, k.Timeline):
 		if r := m.currentRow(); r != nil {
+			if r.Shrunk {
+				m.flashShrunk("change timeline")
+				return m, nil
+			}
 			m.captureSelection(*r)
 			return m, loadChangeTimelineCmd(m.store, r.Kind, r.Namespace, r.Name)
 		}
 	case key.Matches(msg, k.Logs):
 		if r := m.currentRow(); r != nil && r.Kind == "pods" {
+			if r.Shrunk {
+				m.flashShrunk("logs")
+				return m, nil
+			}
 			m.captureSelection(*r)
 			return m, loadLogsCmd(m.store, m.snapshots[m.curSnap].ID, r.Namespace, r.Name)
 		}
@@ -887,6 +899,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.flashUntil = time.Now().Add(2 * time.Second)
 	case key.Matches(msg, k.YAML):
 		if r := m.currentRow(); r != nil {
+			if r.Shrunk {
+				m.flashShrunk("yaml")
+				return m, nil
+			}
 			m.captureSelection(*r)
 			return m, loadYAMLCmd(m.store, m.snapshots[m.curSnap].ID, r.Kind, r.Namespace, r.Name)
 		}
@@ -970,11 +986,13 @@ func (m Model) renderMain() string {
 		headers = append(headers, c.Title)
 	}
 	rowCells := make([][]string, len(m.rows))
+	rowMuted := make([]bool, len(m.rows))
 	for i, r := range m.rows {
 		rowCells[i] = r.Cells
+		rowMuted[i] = r.Shrunk
 	}
 	visible := m.tableVisibleRows()
-	b.WriteString(renderTable(headers, rowCells, m.width, m.selRow, m.scroll, visible))
+	b.WriteString(renderTable(headers, rowCells, m.width, m.selRow, m.scroll, visible, rowMuted))
 	// Per-kind status note
 	if st, ok := m.kindStatus[m.kinds[m.curKind].Kind]; ok && st != model.StatusOK {
 		msg := string(st)
@@ -1409,6 +1427,14 @@ func (m Model) effectiveIncidents() []model.IncidentSeverity {
 		}
 	}
 	return out
+}
+
+// flashShrunk shows a status-bar hint when the user invokes an action that
+// requires per-resource detail data, but the row is marked shrunk and that
+// data was stripped by `kk shrink`.
+func (m *Model) flashShrunk(action string) {
+	m.statusFlash = fmt.Sprintf("%s unavailable: this row was stripped by `kk shrink`", action)
+	m.flashUntil = time.Now().Add(3 * time.Second)
 }
 
 func plural(n int) string {

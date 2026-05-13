@@ -13,7 +13,10 @@ import (
 // selectedIdx is the visible row (after scroll) to highlight; -1 = none.
 // scroll is the index of the first row to render.
 // visibleRows is how many rows fit on screen.
-func renderTable(headers []string, rows [][]string, width int, selectedIdx, scroll, visibleRows int) string {
+// muted is a parallel-to-rows []bool; rows where muted[i] is true are
+// rendered in StyleMuted to indicate they've been shrunk and lost their
+// detail data. Selection styling still wins on the cursor row.
+func renderTable(headers []string, rows [][]string, width int, selectedIdx, scroll, visibleRows int, muted []bool) string {
 	colWidths := computeColWidths(headers, rows, width)
 
 	var b strings.Builder
@@ -27,9 +30,12 @@ func renderTable(headers []string, rows [][]string, width int, selectedIdx, scro
 	}
 	for i := scroll; i < end; i++ {
 		line := joinCells(rows[i], colWidths)
-		if i-scroll == selectedIdx {
+		switch {
+		case i-scroll == selectedIdx:
 			b.WriteString(StyleSelected.Render(line))
-		} else {
+		case i < len(muted) && muted[i]:
+			b.WriteString(StyleMuted.Render(line))
+		default:
 			b.WriteString(line)
 		}
 		b.WriteString("\n")

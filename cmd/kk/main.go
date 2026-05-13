@@ -34,6 +34,7 @@ const usage = `kk — KronoKube, a read-only Kubernetes time machine
 Commands:
   record    Capture snapshots of a cluster into a .kk file (TUI live mode)
   replay    Open an existing .kk file and scrub through its history
+  shrink    Strip non-essential data (logs / describe / yaml) from healthy pods
   safety    Print the kubectl allowlist (audit aid)
 
 Run "kk <command> -h" for command-specific flags.`
@@ -48,6 +49,8 @@ func main() {
 		runRecord(os.Args[2:])
 	case "replay":
 		runReplay(os.Args[2:])
+	case "shrink":
+		runShrink(os.Args[2:])
 	case "safety", "audit":
 		runSafetyAudit()
 	case "-h", "--help", "help":

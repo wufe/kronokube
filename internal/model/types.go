@@ -36,6 +36,10 @@ type Row struct {
 	Cells     []string
 	// RawJSON is the resource's full JSON, used for describe/timeline diffing.
 	RawJSON []byte
+	// Shrunk is true when this row's blob has been stripped by `kk shrink`.
+	// The cells are still authoritative; describe/yaml/logs/timeline are
+	// disabled in the TUI. Only ever set on pod rows.
+	Shrunk bool
 }
 
 // PodLog is the tail of recent log output for a pod, captured when

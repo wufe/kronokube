@@ -55,6 +55,10 @@ and silently disabled if the binary isn't found.
     # replay
     kk replay incident.kk
 
+    # shrink (strip non-essential data for healthy pods)
+    kk shrink incident.kk           # in place, prompts for confirmation
+    kk shrink incident.kk -o lean.kk -y   # write a copy, no prompt
+
     # audit safety
     kk safety
 
@@ -112,6 +116,19 @@ Skipped intentionally:
 - **Secrets** — never captured. The `.kk` file is safe to share.
 - **ConfigMaps / PVCs / PVs / StorageClasses** — not in default scope.
 - **CRDs** — not captured; built-in resources only.
+### Shrinking a recording
+
+`kk shrink <file.kk>` strips data that's almost certainly noise for a
+post-mortem. For every captured pod we keep its full detail (resource JSON
++ captured logs) only at snapshots where the pod was unhealthy, plus the
+two adjacent snapshots (one before and one after, for context). All other
+(pod, snapshot) pairs lose their blob — it's replaced by a shared empty
+placeholder — and their captured logs are deleted. The pod row itself
+stays so the resource keeps appearing in tables, just greyed-out; `d`,
+`y`, `l`, `t` on a stripped row show a "no data, run by kk shrink" hint.
+Non-pod resources are left untouched. SQLite is `VACUUM`ed at the end so
+the freed space is returned to the filesystem.
+
 - **Pod logs** — off by default. Enable with `pod_logs.enabled: true` in
   config (see `examples/config.yaml`); KronoKube then fetches a per-container
   tail (default 100 lines) for every captured pod, using

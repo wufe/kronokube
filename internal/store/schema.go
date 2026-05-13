@@ -45,12 +45,21 @@ CREATE TABLE IF NOT EXISTS resources (
     uid         TEXT NOT NULL DEFAULT '',
     cells_json  TEXT NOT NULL,
     blob_id     INTEGER NOT NULL,
+    -- shrunk=1 marks rows whose blob has been intentionally stripped by
+    -- the kk shrink command. The row stays so the resource keeps
+    -- appearing in tables, but its describe / yaml / logs interactions
+    -- are disabled in the TUI.
+    shrunk      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (snapshot_id, kind, namespace, name),
     FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE,
     FOREIGN KEY (blob_id) REFERENCES blobs(id)
 );
 CREATE INDEX IF NOT EXISTS resources_uid ON resources(uid);
 CREATE INDEX IF NOT EXISTS resources_kind ON resources(kind);
+-- Speeds up the orphan-blob GC that kk shrink runs ("delete blobs that
+-- no row references"). Without it that step is O(blobs × resources) on a
+-- big file and dwarfs the rest of the operation.
+CREATE INDEX IF NOT EXISTS resources_blob_id ON resources(blob_id);
 
 CREATE TABLE IF NOT EXISTS events (
     snapshot_id INTEGER NOT NULL,
@@ -84,6 +93,8 @@ CREATE TABLE IF NOT EXISTS pod_logs (
     FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE,
     FOREIGN KEY (content_blob_id) REFERENCES blobs(id)
 );
+-- Same reason as resources_blob_id — speeds up the shrink GC step.
+CREATE INDEX IF NOT EXISTS pod_logs_blob_id ON pod_logs(content_blob_id);
 `
 
 const currentSchemaVersion = "1"

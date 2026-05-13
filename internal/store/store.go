@@ -29,11 +29,48 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	if err := migrateAddShrunkColumn(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate resources.shrunk: %w", err)
+	}
 	s := &Store{db: db, path: path}
 	if err := s.setMeta("schema_version", currentSchemaVersion); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+// migrateAddShrunkColumn brings older .kk files up to the current schema
+// by adding resources.shrunk if it's missing. CREATE TABLE IF NOT EXISTS
+// wouldn't help here — that branch never fires when the table already
+// exists, so we use PRAGMA table_info to look for the column.
+func migrateAddShrunkColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(resources)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasShrunk := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "shrunk" {
+			hasShrunk = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasShrunk {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE resources ADD COLUMN shrunk INTEGER NOT NULL DEFAULT 0`)
+	return err
 }
 
 // Close closes the underlying database.
