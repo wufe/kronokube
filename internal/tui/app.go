@@ -871,7 +871,7 @@ func shortFile(p string) string {
 }
 
 func (m Model) renderStatus() string {
-	help := "tab: kind  /: filter  enter: describe  y: yaml  e: events  t: changes  o: logs  n: ns  ←/→: 1  ⇧←/⇧→: 10  </>: 1%  L: live  ?: help  q: quit"
+	help := "tab: kind  /: filter  enter: describe  y: yaml  e: events  t: changes  o: logs  n: ns  ←/→: 1  ⇧←/⇧→: 10  </>: 1%  L: live  ?: help  C-c: quit"
 	if time.Now().Before(m.flashUntil) && m.statusFlash != "" {
 		return StyleOK.Render(m.statusFlash) + "  " + StyleMuted.Render(help)
 	}
@@ -939,12 +939,12 @@ func (m Model) renderDetail() string {
 			b.WriteString("\n")
 		}
 		b.WriteString("\n")
-		b.WriteString(StyleMuted.Render("enter: jump to this snapshot   esc: back   q: quit"))
+		b.WriteString(StyleMuted.Render("enter: jump to this snapshot   esc: back   C-c: quit"))
 		return b.String()
 	}
 
 	body = strings.Join(lines[start:end], "\n")
-	footerText := fmt.Sprintf("line %d/%d   ↑↓ scroll   gg/G: top/bottom   esc: back   q: quit", start+1, len(lines))
+	footerText := fmt.Sprintf("line %d/%d   ↑↓ scroll   gg/G: top/bottom   esc: back   C-c: quit", start+1, len(lines))
 	if m.view == viewLogs {
 		wrapState := "off"
 		if m.logsWrap {
@@ -954,7 +954,7 @@ func (m Model) renderDetail() string {
 		if loglensPath() != "" {
 			ll = "   enter: open in loglens"
 		}
-		footerText = fmt.Sprintf("line %d/%d   ↑↓ scroll   gg/G: top/bottom   w: wrap (%s)%s   esc: back   q: quit", start+1, len(lines), wrapState, ll)
+		footerText = fmt.Sprintf("line %d/%d   ↑↓ scroll   gg/G: top/bottom   w: wrap (%s)%s   esc: back   C-c: quit", start+1, len(lines), wrapState, ll)
 	}
 	footer := StyleMuted.Render(footerText)
 	return header + "\n\n" + body + "\n" + footer
@@ -1046,7 +1046,7 @@ INSPECT
 
 OTHER
   ?                 help
-  q / ctrl-c        quit
+  ctrl-c            quit
   esc               back / cancel
 
 SAFETY

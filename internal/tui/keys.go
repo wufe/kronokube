@@ -39,7 +39,7 @@ type KeyMap struct {
 // DefaultKeyMap returns the standard bindings.
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
-		Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		Quit:        key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("C-c", "quit")),
 		Help:        key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Up:          key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
 		Down:        key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),

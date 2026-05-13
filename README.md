@@ -93,7 +93,7 @@ Common flags:
     t                   change timeline for selected resource
     o                   pod logs at this snapshot (requires pod_logs.enabled)
 
-    ?                   help        q  quit       esc  back
+    ?                   help        Ctrl-C  quit       esc  back
 
 ## What is captured
 
