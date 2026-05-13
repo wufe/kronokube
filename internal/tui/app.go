@@ -701,7 +701,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, k.NamespaceSw):
 		return m, loadNamespacesCmd(m.store)
-	case key.Matches(msg, k.Describe), msg.Type == tea.KeyEnter:
+	case key.Matches(msg, k.Describe):
 		if r := m.currentRow(); r != nil {
 			m.captureSelection(*r)
 			return m, loadDescribeCmd(m.store, m.snapshots[m.curSnap].ID, r.Kind, r.Namespace, r.Name, r.UID)
@@ -871,7 +871,7 @@ func shortFile(p string) string {
 }
 
 func (m Model) renderStatus() string {
-	help := "tab: kind  /: filter  enter: describe  y: yaml  e: events  t: changes  o: logs  n: ns  ←/→: 1  ⇧←/⇧→: 10  </>: 1%  L: live  ?: help  C-c: quit"
+	help := "tab: kind  /: filter  d: describe  y: yaml  e: events  t: changes  l: logs  n: ns  ←/→: 1  ⇧←/⇧→: 10  </>: 1%  L: live  ?: help  C-c: quit"
 	if time.Now().Before(m.flashUntil) && m.statusFlash != "" {
 		return StyleOK.Render(m.statusFlash) + "  " + StyleMuted.Render(help)
 	}
@@ -1035,11 +1035,11 @@ TIMELINE (REPLAY)
   L                 jump to live (resume follow)
 
 INSPECT
-  enter / d         describe selected resource
+  d                 describe selected resource
   y                 raw YAML of selected resource (from captured data)
   e                 events for selected resource (across all snapshots)
   t                 changes timeline for selected resource
-  o                 pod logs at this snapshot (when pod_logs.enabled in config)
+  l                 pod logs at this snapshot (when pod_logs.enabled in config)
   w                 toggle line wrap inside the logs view
   enter             open the current log tail in loglens (if loglens is on PATH)
   gg / G            (inside detail views) jump to first / last line

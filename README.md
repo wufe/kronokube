@@ -87,11 +87,11 @@ Common flags:
     Ctrl-A / Ctrl-E     first / last snapshot
     L                   jump to live (resume follow)
 
-    enter / d           describe selected resource (uses captured data)
+    d                   describe selected resource (uses captured data)
     y                   raw YAML of selected resource (from captured data)
     e                   events for selected resource (across whole file)
     t                   change timeline for selected resource
-    o                   pod logs at this snapshot (requires pod_logs.enabled)
+    l                   pod logs at this snapshot (requires pod_logs.enabled)
 
     ?                   help        Ctrl-C  quit       esc  back
 
