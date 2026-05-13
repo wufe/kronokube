@@ -108,6 +108,36 @@ func ClassifyPodHealth(status, ready string) PodHealth {
 	return HealthHealthy
 }
 
+// ClassifyStatusOnly looks at just the pod STATUS cell, ignoring READY.
+// Used by the TUI to decide whether to color the STATUS column itself —
+// READY-driven failures (Running with not-all-ready) are surfaced by
+// coloring the READY column instead, via ReadyComplete.
+func ClassifyStatusOnly(status string) PodHealth {
+	status = strings.TrimSpace(status)
+	if strings.HasPrefix(status, "Init:") || strings.HasPrefix(status, "Signal:") {
+		return HealthSoftBad
+	}
+	if strings.HasPrefix(status, "Sig:") || strings.HasPrefix(status, "ExitCode:") {
+		return HealthHardBad
+	}
+	if _, bad := hardBadStatuses[status]; bad {
+		return HealthHardBad
+	}
+	if _, soft := softBadStatuses[status]; soft {
+		return HealthSoftBad
+	}
+	switch status {
+	case "Running", "Succeeded", "Completed", "":
+		return HealthHealthy
+	}
+	return HealthSoftBad
+}
+
+// ReadyComplete reports whether a k8s-style "n/m" READY cell means "all
+// containers ready" (n == m, both positive). Exported wrapper around
+// isReadyComplete so the TUI can use the same definition.
+func ReadyComplete(cell string) bool { return isReadyComplete(cell) }
+
 // isReadyComplete returns true for "n/n" with n>0, false otherwise (including
 // "0/0", which we treat as unhealthy — a pod with no ready containers).
 func isReadyComplete(cell string) bool {

@@ -16,12 +16,16 @@ import (
 // muted is a parallel-to-rows []bool; rows where muted[i] is true are
 // rendered in StyleMuted to indicate they've been shrunk and lost their
 // detail data. Selection styling still wins on the cursor row.
-func renderTable(headers []string, rows [][]string, width int, selectedIdx, scroll, visibleRows int, muted []bool) string {
+// cellStyles, if non-nil, gives a per-(row, column) lipgloss.Style. The
+// zero-value style renders as plain text, so empty cells in the matrix
+// just stay un-styled. Used to color e.g. the STATUS / READY cells of
+// unhealthy pods.
+func renderTable(headers []string, rows [][]string, width int, selectedIdx, scroll, visibleRows int, muted []bool, cellStyles [][]lipgloss.Style) string {
 	colWidths := computeColWidths(headers, rows, width)
 
 	var b strings.Builder
 	// Header
-	b.WriteString(StyleHeader.Render(joinCells(headers, colWidths)))
+	b.WriteString(StyleHeader.Render(joinCells(headers, colWidths, nil)))
 	b.WriteString("\n")
 
 	end := scroll + visibleRows
@@ -29,7 +33,11 @@ func renderTable(headers []string, rows [][]string, width int, selectedIdx, scro
 		end = len(rows)
 	}
 	for i := scroll; i < end; i++ {
-		line := joinCells(rows[i], colWidths)
+		var styles []lipgloss.Style
+		if i < len(cellStyles) {
+			styles = cellStyles[i]
+		}
+		line := joinCells(rows[i], colWidths, styles)
 		switch {
 		case i-scroll == selectedIdx:
 			b.WriteString(StyleSelected.Render(line))
@@ -93,7 +101,7 @@ func computeColWidths(headers []string, rows [][]string, width int) []int {
 	return w
 }
 
-func joinCells(cells []string, widths []int) string {
+func joinCells(cells []string, widths []int, styles []lipgloss.Style) string {
 	var b strings.Builder
 	for i, w := range widths {
 		var c string
@@ -103,9 +111,15 @@ func joinCells(cells []string, widths []int) string {
 		if lipgloss.Width(c) > w-1 && w > 1 {
 			c = truncRunes(c, w-1)
 		}
-		b.WriteString(c)
-		// pad
-		pad := w - lipgloss.Width(c)
+		// Apply per-cell style after truncation so we never slice into
+		// the middle of an ANSI sequence. Padding is computed from the
+		// (still-correct) visual width via lipgloss.Width.
+		rendered := c
+		if i < len(styles) {
+			rendered = styles[i].Render(c)
+		}
+		b.WriteString(rendered)
+		pad := w - lipgloss.Width(rendered)
 		if pad > 0 {
 			b.WriteString(strings.Repeat(" ", pad))
 		}

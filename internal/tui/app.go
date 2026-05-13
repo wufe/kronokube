@@ -991,8 +991,9 @@ func (m Model) renderMain() string {
 		rowCells[i] = r.Cells
 		rowMuted[i] = r.Shrunk
 	}
+	cellStyles := m.podCellStyles()
 	visible := m.tableVisibleRows()
-	b.WriteString(renderTable(headers, rowCells, m.width, m.selRow, m.scroll, visible, rowMuted))
+	b.WriteString(renderTable(headers, rowCells, m.width, m.selRow, m.scroll, visible, rowMuted, cellStyles))
 	// Per-kind status note
 	if st, ok := m.kindStatus[m.kinds[m.curKind].Kind]; ok && st != model.StatusOK {
 		msg := string(st)
@@ -1395,6 +1396,44 @@ func (m Model) pageStep() int {
 		step = 25
 	}
 	return step
+}
+
+// podCellStyles produces per-(row, column) style hints for the pods table
+// so unhealthy pods light up: yellow for transient soft-bad states
+// (Pending / Terminating / ContainerCreating / Init:*), red for concrete
+// failures (CrashLoopBackOff / OOMKilled / etc.) and a red READY cell
+// when a pod is Running with not-all-ready (probe failures).
+//
+// Returns nil for non-pod kinds so the table renderer's plain path runs
+// unchanged.
+func (m Model) podCellStyles() [][]lipgloss.Style {
+	if m.curKind >= len(m.kinds) || m.kinds[m.curKind].Kind != "pods" {
+		return nil
+	}
+	// Cell indices in the pods catalog (see model.defPods): NAMESPACE(0),
+	// NAME(1), READY(2), STATUS(3), …
+	const readyCol, statusCol = 2, 3
+	out := make([][]lipgloss.Style, len(m.rows))
+	for i, r := range m.rows {
+		if r.Shrunk || len(r.Cells) <= statusCol {
+			continue
+		}
+		styles := make([]lipgloss.Style, len(r.Cells))
+		switch model.ClassifyStatusOnly(r.Cells[statusCol]) {
+		case model.HealthHardBad:
+			styles[statusCol] = StyleIncidentRed
+		case model.HealthSoftBad:
+			styles[statusCol] = StyleIncidentYellow
+		}
+		// READY is red iff the pod is Running but probes aren't all green.
+		// Other states (Pending, ContainerCreating, …) naturally have
+		// READY != n/n, but that's expected — STATUS already conveys it.
+		if r.Cells[statusCol] == "Running" && !model.ReadyComplete(r.Cells[readyCol]) {
+			styles[readyCol] = StyleIncidentRed
+		}
+		out[i] = styles
+	}
+	return out
 }
 
 // effectiveIncidents returns the severity vector that should drive the
