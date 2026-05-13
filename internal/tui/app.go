@@ -535,25 +535,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.selRow, m.scroll = 0, 0
 		return m, m.refreshRowsCmd()
 	case key.Matches(msg, k.PrevSnap):
-		if len(m.snapshots) == 0 {
-			return m, nil
-		}
-		if m.curSnap > 0 {
-			m.curSnap--
-		}
-		m.follow = false
-		return m, m.refreshRowsCmd()
+		return m.jumpSnap(-1)
 	case key.Matches(msg, k.NextSnap):
-		if len(m.snapshots) == 0 {
-			return m, nil
-		}
-		if m.curSnap < len(m.snapshots)-1 {
-			m.curSnap++
-		}
-		if m.curSnap == len(m.snapshots)-1 {
-			m.follow = m.live
-		}
-		return m, m.refreshRowsCmd()
+		return m.jumpSnap(+1)
+	case key.Matches(msg, k.PrevSnapFast):
+		return m.jumpSnap(-10)
+	case key.Matches(msg, k.NextSnapFast):
+		return m.jumpSnap(+10)
+	case key.Matches(msg, k.PrevSnapPage):
+		return m.jumpSnap(-m.pageStep())
+	case key.Matches(msg, k.NextSnapPage):
+		return m.jumpSnap(+m.pageStep())
 	case key.Matches(msg, k.JumpStart):
 		m.curSnap = 0
 		m.follow = false
@@ -769,7 +761,7 @@ func shortFile(p string) string {
 }
 
 func (m Model) renderStatus() string {
-	help := "tab: kind  /: filter  enter: describe  y: yaml  e: events  t: changes  o: logs  n: ns  ←/→: scrub  L: live  ?: help  q: quit"
+	help := "tab: kind  /: filter  enter: describe  y: yaml  e: events  t: changes  o: logs  n: ns  ←/→: 1  ⇧←/⇧→: 10  </>: 1%  L: live  ?: help  q: quit"
 	if time.Now().Before(m.flashUntil) && m.statusFlash != "" {
 		return StyleOK.Render(m.statusFlash) + "  " + StyleMuted.Render(help)
 	}
@@ -884,7 +876,9 @@ NAVIGATION
   n                 namespace picker
 
 TIMELINE (REPLAY)
-  ← →               prev / next snapshot
+  ← →               prev / next snapshot (one at a time)
+  ⇧← ⇧→             jump ±10 snapshots
+  < >               jump ±1% of timeline (min 25 snaps)
   ctrl-a / ctrl-e   first / last snapshot
   L                 jump to live (resume follow)
 
@@ -988,6 +982,43 @@ func renderChangeTimeline(kind model.Kind, ns, name string, changes []store.Snap
 		fmt.Fprintf(&b, " %s  #%d  %s\n", marker, c.ID, label)
 	}
 	return b.String()
+}
+
+// jumpSnap moves the timeline cursor by delta snapshots, clamps to range,
+// and toggles follow appropriately. Centralized so 1-step, 10-step, and
+// page-step navigation all behave identically.
+func (m Model) jumpSnap(delta int) (tea.Model, tea.Cmd) {
+	if len(m.snapshots) == 0 || delta == 0 {
+		return m, nil
+	}
+	target := m.curSnap + delta
+	if target < 0 {
+		target = 0
+	}
+	if target > len(m.snapshots)-1 {
+		target = len(m.snapshots) - 1
+	}
+	if target == m.curSnap {
+		return m, nil
+	}
+	m.curSnap = target
+	if m.curSnap == len(m.snapshots)-1 {
+		// Landing on the head re-enables follow in live mode.
+		m.follow = m.live
+	} else {
+		m.follow = false
+	}
+	return m, m.refreshRowsCmd()
+}
+
+// pageStep is "about 1% of the timeline", min 25. Scales naturally:
+// 100 snaps → 25/step, 1175 snaps → 25/step, 10000 snaps → 100/step.
+func (m Model) pageStep() int {
+	step := len(m.snapshots) / 100
+	if step < 25 {
+		step = 25
+	}
+	return step
 }
 
 // --- small helpers ---

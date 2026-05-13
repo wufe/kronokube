@@ -23,10 +23,14 @@ type KeyMap struct {
 	Logs        key.Binding
 	YAML        key.Binding
 	Back        key.Binding
-	PrevSnap    key.Binding
-	NextSnap    key.Binding
-	JumpStart   key.Binding
-	JumpEnd     key.Binding
+	PrevSnap     key.Binding
+	NextSnap     key.Binding
+	PrevSnapFast key.Binding
+	NextSnapFast key.Binding
+	PrevSnapPage key.Binding
+	NextSnapPage key.Binding
+	JumpStart    key.Binding
+	JumpEnd      key.Binding
 	Live        key.Binding
 	NamespaceSw key.Binding
 }
@@ -52,10 +56,14 @@ func DefaultKeyMap() KeyMap {
 		Logs:        key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "pod logs")),
 		YAML:        key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "yaml of resource")),
 		Back:        key.NewBinding(key.WithKeys("esc", "backspace"), key.WithHelp("esc", "back")),
-		PrevSnap:    key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "prev snap")),
-		NextSnap:    key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "next snap")),
-		JumpStart:   key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("C-a", "first snap")),
-		JumpEnd:     key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("C-e", "last snap")),
+		PrevSnap:     key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "prev snap")),
+		NextSnap:     key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "next snap")),
+		PrevSnapFast: key.NewBinding(key.WithKeys("shift+left"), key.WithHelp("⇧←", "back 10 snaps")),
+		NextSnapFast: key.NewBinding(key.WithKeys("shift+right"), key.WithHelp("⇧→", "forward 10 snaps")),
+		PrevSnapPage: key.NewBinding(key.WithKeys("<"), key.WithHelp("<", "back 1% of timeline")),
+		NextSnapPage: key.NewBinding(key.WithKeys(">"), key.WithHelp(">", "forward 1% of timeline")),
+		JumpStart:    key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("C-a", "first snap")),
+		JumpEnd:      key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("C-e", "last snap")),
 		Live:        key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "jump to live")),
 		NamespaceSw: key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "namespace")),
 	}

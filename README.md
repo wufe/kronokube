@@ -72,7 +72,9 @@ Common flags:
     /                   filter
     n                   namespace picker
 
-    ← →                 prev / next snapshot
+    ← →                 prev / next snapshot (one at a time)
+    ⇧← ⇧→               jump ±10 snapshots
+    < >                 jump ±1% of timeline (min 25 snaps)
     Ctrl-A / Ctrl-E     first / last snapshot
     L                   jump to live (resume follow)
 
