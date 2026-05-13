@@ -83,6 +83,10 @@ type Model struct {
 	// default because raw log output is easier to compare side-by-side with
 	// other terminals when it isn't reflowed.
 	logsWrap bool
+	// pendingG implements the vim 'gg' two-press jump-to-top sequence inside
+	// detail views. Set after a lone 'g'; cleared by the second 'g' (which
+	// triggers the jump) or by any other key.
+	pendingG bool
 
 	// Namespace picker
 	namespaces []string
@@ -468,6 +472,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Detail views (describe/events/timeline/logs/yaml) accept scroll + back.
 	if m.view == viewDescribe || m.view == viewEvents || m.view == viewChangeTimeline || m.view == viewLogs || m.view == viewYAML {
+		// Vim-style head/tail navigation. 'gg' jumps to the first line; 'G'
+		// jumps to the last page. Any other key cancels a pending 'g'.
+		raw := msg.String()
+		if raw == "g" {
+			if m.pendingG {
+				m.pendingG = false
+				m.detailScroll = 0
+				return m, nil
+			}
+			m.pendingG = true
+			return m, nil
+		}
+		if raw == "G" {
+			m.pendingG = false
+			m.detailScroll = m.detailLastPageStart()
+			return m, nil
+		}
+		m.pendingG = false
+
 		switch {
 		case key.Matches(msg, k.Quit):
 			return m.quit()
@@ -810,13 +833,14 @@ func (m Model) renderDetail() string {
 		body = hardWrap(body, m.width)
 	}
 	lines := strings.Split(body, "\n")
-	start := m.detailScroll
-	if start >= len(lines) {
-		start = max0(len(lines) - 1)
-	}
 	visible := m.height - 4
 	if visible < 5 {
 		visible = 5
+	}
+	maxStart := max0(len(lines) - visible)
+	start := m.detailScroll
+	if start > maxStart {
+		start = maxStart
 	}
 	end := start + visible
 	if end > len(lines) {
@@ -843,13 +867,13 @@ func (m Model) renderDetail() string {
 	}
 
 	body = strings.Join(lines[start:end], "\n")
-	footerText := fmt.Sprintf("line %d/%d   ↑↓ scroll   esc: back   q: quit", start+1, len(lines))
+	footerText := fmt.Sprintf("line %d/%d   ↑↓ scroll   gg/G: top/bottom   esc: back   q: quit", start+1, len(lines))
 	if m.view == viewLogs {
 		wrapState := "off"
 		if m.logsWrap {
 			wrapState = "on"
 		}
-		footerText = fmt.Sprintf("line %d/%d   ↑↓ scroll   w: wrap (%s)   esc: back   q: quit", start+1, len(lines), wrapState)
+		footerText = fmt.Sprintf("line %d/%d   ↑↓ scroll   gg/G: top/bottom   w: wrap (%s)   esc: back   q: quit", start+1, len(lines), wrapState)
 	}
 	footer := StyleMuted.Render(footerText)
 	return header + "\n\n" + body + "\n" + footer
@@ -936,6 +960,7 @@ INSPECT
   t                 changes timeline for selected resource
   o                 pod logs at this snapshot (when pod_logs.enabled in config)
   w                 toggle line wrap inside the logs view
+  gg / G            (inside detail views) jump to first / last line
 
 OTHER
   ?                 help
@@ -1030,6 +1055,25 @@ func renderChangeTimeline(kind model.Kind, ns, name string, changes []store.Snap
 		fmt.Fprintf(&b, " %s  #%d  %s\n", marker, c.ID, label)
 	}
 	return b.String()
+}
+
+// detailLastPageStart computes the scroll offset that puts the last line of
+// the detail body at the bottom of the viewport. Needs to take wrap state
+// into account since wrapping changes line count.
+func (m Model) detailLastPageStart() int {
+	body := m.detail
+	if m.view == viewLogs && m.logsWrap && m.width > 0 {
+		body = hardWrap(body, m.width)
+	}
+	total := strings.Count(body, "\n") + 1
+	visible := m.height - 4
+	if visible < 5 {
+		visible = 5
+	}
+	if total <= visible {
+		return 0
+	}
+	return total - visible
 }
 
 // jumpSnap moves the timeline cursor by delta snapshots, clamps to range,
