@@ -115,6 +115,26 @@ func computePodFilter(s *store.Store, snapID int64, parentKind model.Kind, paren
 	return out, nil
 }
 
+// resolveResourceBlob returns the resource's blob at snapID, or — if that
+// row was stripped by `kk shrink` — any other non-shrunk version of the
+// same resource elsewhere in the file. ownerReferences and spec.nodeName
+// don't change over a resource's lifetime, so any real copy is a fine
+// stand-in for ownership / scheduling questions during a drill-down.
+//
+// This is what makes the drill view show shrunk-but-owned pods (greyed
+// out) alongside their live siblings, instead of silently filtering them
+// out.
+func resolveResourceBlob(s *store.Store, snapID int64, kind model.Kind, ns, name string) ([]byte, error) {
+	raw, err := s.FetchRaw(snapID, kind, ns, name)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > 0 {
+		return raw, nil
+	}
+	return s.FetchAnyRealBlob(kind, ns, name)
+}
+
 // childrenOwnedBy returns the set of names of `childKind` rows in `ns`
 // whose ownerReferences contain (ownerKind, ownerName).
 func childrenOwnedBy(s *store.Store, snapID int64, childKind model.Kind, ns, ownerKind, ownerName string) (map[string]bool, error) {
@@ -124,8 +144,8 @@ func childrenOwnedBy(s *store.Store, snapID int64, childKind model.Kind, ns, own
 	}
 	owned := make(map[string]bool, len(rows))
 	for _, r := range rows {
-		raw, err := s.FetchRaw(snapID, childKind, r.Namespace, r.Name)
-		if err != nil || raw == nil {
+		raw, err := resolveResourceBlob(s, snapID, childKind, r.Namespace, r.Name)
+		if err != nil || len(raw) == 0 {
 			continue
 		}
 		if isOwnedBy(raw, ownerKind, ownerName) {
@@ -141,8 +161,8 @@ func podsOwnedBy(s *store.Store, snapID int64, ns, ownerKind, ownerName string, 
 		return err
 	}
 	for _, r := range rows {
-		raw, err := s.FetchRaw(snapID, "pods", r.Namespace, r.Name)
-		if err != nil || raw == nil {
+		raw, err := resolveResourceBlob(s, snapID, "pods", r.Namespace, r.Name)
+		if err != nil || len(raw) == 0 {
 			continue
 		}
 		if isOwnedBy(raw, ownerKind, ownerName) {
@@ -161,8 +181,8 @@ func podsOwnedByAny(s *store.Store, snapID int64, ns, ownerKind string, ownerNam
 		return err
 	}
 	for _, r := range rows {
-		raw, err := s.FetchRaw(snapID, "pods", r.Namespace, r.Name)
-		if err != nil || raw == nil {
+		raw, err := resolveResourceBlob(s, snapID, "pods", r.Namespace, r.Name)
+		if err != nil || len(raw) == 0 {
 			continue
 		}
 		if isOwnedByAny(raw, ownerKind, ownerNames) {
@@ -178,8 +198,8 @@ func podsOnNode(s *store.Store, snapID int64, nodeName string, out map[string]bo
 		return err
 	}
 	for _, r := range rows {
-		raw, err := s.FetchRaw(snapID, "pods", r.Namespace, r.Name)
-		if err != nil || raw == nil {
+		raw, err := resolveResourceBlob(s, snapID, "pods", r.Namespace, r.Name)
+		if err != nil || len(raw) == 0 {
 			continue
 		}
 		if podNodeName(raw) == nodeName {

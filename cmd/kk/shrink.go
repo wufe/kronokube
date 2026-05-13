@@ -297,6 +297,16 @@ func computeShrinkTargets(rows []store.PodHealthRow, snapshots []store.SnapshotI
 				important[o.idx+1] = struct{}{}
 			}
 		}
+		// Always keep at least one blob per pod so the drill-down's
+		// resolveResourceBlob fallback can recover its ownerReferences
+		// and spec.nodeName. Without this an always-healthy pod loses
+		// every blob to the empty placeholder and silently disappears
+		// from drilled views (e.g. a StatefulSet that shows only the
+		// pods that had incidents). The first sighting is plenty —
+		// ownership and node assignment don't change over a pod's life.
+		if len(important) == 0 {
+			important[curObs[0].idx] = struct{}{}
+		}
 		for _, o := range curObs {
 			if _, keep := important[o.idx]; keep {
 				continue

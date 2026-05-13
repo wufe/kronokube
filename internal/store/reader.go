@@ -94,6 +94,26 @@ func (s *Store) ResourcesForKind(snapID int64, kind model.Kind, namespace string
 	return out, rows.Err()
 }
 
+// FetchAnyRealBlob returns the raw JSON of *any* non-shrunk version of
+// the given resource, from anywhere in the file. Used by the drill-down
+// fallback when the current snapshot's blob has been stripped by
+// `kk shrink`: ownership and node-affinity fields are stable across a
+// resource's lifetime, so any real blob can answer the question
+// "which parent owns this pod?".
+//
+// Returns (nil, nil) if no non-shrunk copy exists anywhere in the file.
+func (s *Store) FetchAnyRealBlob(kind model.Kind, namespace, name string) ([]byte, error) {
+	var data []byte
+	err := s.db.QueryRow(`SELECT b.data FROM resources r JOIN blobs b ON b.id=r.blob_id
+		WHERE r.kind=? AND r.namespace=? AND r.name=? AND r.shrunk=0
+		ORDER BY r.snapshot_id ASC LIMIT 1`,
+		string(kind), namespace, name).Scan(&data)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return data, err
+}
+
 // FetchRaw returns the raw resource JSON at this snapshot.
 func (s *Store) FetchRaw(snapID int64, kind model.Kind, namespace, name string) ([]byte, error) {
 	var data []byte

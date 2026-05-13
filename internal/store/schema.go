@@ -60,6 +60,11 @@ CREATE INDEX IF NOT EXISTS resources_kind ON resources(kind);
 -- no row references"). Without it that step is O(blobs × resources) on a
 -- big file and dwarfs the rest of the operation.
 CREATE INDEX IF NOT EXISTS resources_blob_id ON resources(blob_id);
+-- Used by FetchAnyRealBlob — the drill-down fallback that looks up a
+-- non-shrunk version of a (kind, namespace, name) elsewhere in the file
+-- when the current snapshot's blob has been stripped. The PRIMARY KEY's
+-- leading column is snapshot_id, so it can't serve a cross-snapshot lookup.
+CREATE INDEX IF NOT EXISTS resources_locator ON resources(kind, namespace, name);
 
 CREATE TABLE IF NOT EXISTS events (
     snapshot_id INTEGER NOT NULL,
