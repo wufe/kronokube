@@ -59,11 +59,17 @@ type Model struct {
 	// locked; Esc unwinds back to the originating kind.
 	drill *drillState
 
-	// incidents is a per-snapshot severity vector parallel to `snapshots`.
-	// Built in a goroutine on snapshotsLoadedMsg so opening a 1k-snapshot
-	// .kk file doesn't stall the first paint. May lag behind `snapshots` by
-	// up to one rebuild; the rebuild is cheap and re-runs on every refresh.
+	// incidents is the per-snapshot severity vector parallel to `snapshots`,
+	// max across every captured pod. Built in a goroutine on
+	// snapshotsLoadedMsg so opening a 1k-snapshot .kk file doesn't stall
+	// the first paint. May lag behind `snapshots` by up to one rebuild;
+	// the rebuild is cheap and re-runs on every refresh.
 	incidents []model.IncidentSeverity
+	// incidentsPerPod is the same data sliced by pod ("namespace/name").
+	// Only populated for pods that ever produced an incident. Used when a
+	// drill-down is active to narrow the timeline markers to just the
+	// selected parent's children.
+	incidentsPerPod map[string][]model.IncidentSeverity
 
 	// Resource kind navigation
 	kinds   []model.ResourceDef // filtered: excludes Events; Events has its own view
@@ -232,11 +238,13 @@ type drillLoadedMsg struct {
 }
 
 // incidentsLoadedMsg delivers an updated severity vector built in a
-// goroutine. The vector is parallel to model.snapshots at build time;
-// applying it when the live timeline has already grown is fine — we just
-// pad with IncidentNone, and the next rebuild fills the new entries.
+// goroutine. The vectors are parallel to model.snapshots at build time;
+// applying them when the live timeline has already grown is fine — we
+// just see fewer entries than the live count, and the next rebuild fills
+// in the new snapshots.
 type incidentsLoadedMsg struct {
-	incidents []model.IncidentSeverity
+	global []model.IncidentSeverity
+	perPod map[string][]model.IncidentSeverity
 }
 
 type clockTickMsg struct{}
@@ -392,7 +400,7 @@ func rebuildIncidentsCmd(s *store.Store, snapshots []store.SnapshotInfo) tea.Cmd
 		if err != nil {
 			return errMsg{err}
 		}
-		return incidentsLoadedMsg{incidents: out}
+		return incidentsLoadedMsg{global: out.global, perPod: out.perPod}
 	}
 }
 
@@ -436,7 +444,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.refreshRowsCmd(), rebuildIncidentsCmd(m.store, m.snapshots))
 
 	case incidentsLoadedMsg:
-		m.incidents = msg.incidents
+		m.incidents = msg.global
+		m.incidentsPerPod = msg.perPod
 		return m, nil
 
 	case drillLoadedMsg:
@@ -948,8 +957,9 @@ func (m Model) renderMain() string {
 		b.WriteString(StyleWarn.Render(msg))
 		b.WriteString("\n")
 	}
-	// Timeline
-	b.WriteString(renderTimelineBar(m.width, m.snapshots, m.curSnap, m.follow || !m.live, m.incidents))
+	// Timeline. The incidents we display narrow to the drilled parent's
+	// pods when drill is active, otherwise we show the global view.
+	b.WriteString(renderTimelineBar(m.width, m.snapshots, m.curSnap, m.follow || !m.live, m.effectiveIncidents()))
 	b.WriteString("\n")
 	// Status bar
 	b.WriteString(m.renderStatus())
@@ -1340,6 +1350,38 @@ func (m Model) pageStep() int {
 		step = 25
 	}
 	return step
+}
+
+// effectiveIncidents returns the severity vector that should drive the
+// timeline markers. Without a drill, that's the global vector built from
+// every captured pod. With a drill active, we union just the per-pod
+// vectors of pods in the drill's set — so the markers reflect the same
+// resources the user has narrowed the table to.
+func (m Model) effectiveIncidents() []model.IncidentSeverity {
+	if m.drill == nil || len(m.incidentsPerPod) == 0 || len(m.drill.podSet) == 0 {
+		return m.incidents
+	}
+	n := len(m.snapshots)
+	if n == 0 {
+		return nil
+	}
+	out := make([]model.IncidentSeverity, n)
+	for key := range m.drill.podSet {
+		v, ok := m.incidentsPerPod[key]
+		if !ok {
+			continue
+		}
+		lim := len(v)
+		if lim > n {
+			lim = n
+		}
+		for i := 0; i < lim; i++ {
+			if v[i] > out[i] {
+				out[i] = v[i]
+			}
+		}
+	}
+	return out
 }
 
 func plural(n int) string {

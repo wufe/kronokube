@@ -5,8 +5,24 @@ import (
 	"github.com/wufe/kronokube/internal/store"
 )
 
+// incidentIndex is the precomputed health view of a .kk file.
+//
+//   - global[i]  = max severity at snapshot i across every pod.
+//   - perPod[k]  = severity vector parallel to snapshots, but only the
+//                  contribution of pod k ("namespace/name"). Pods that
+//                  never produced an incident are not stored.
+//
+// The TUI renders `global` by default and switches to a freshly merged
+// view derived from `perPod` while a drill-down is active, so the timeline
+// markers narrow to just the selected parent's children.
+type incidentIndex struct {
+	global []model.IncidentSeverity
+	perPod map[string][]model.IncidentSeverity
+}
+
 // buildIncidentIndex walks all pod rows across the .kk file and produces a
-// per-snapshot severity vector parallel to `snapshots`.
+// per-snapshot severity vector parallel to `snapshots`, plus a per-pod
+// breakdown used by the drill-down view.
 //
 // Algorithm:
 //
@@ -35,9 +51,9 @@ import (
 //
 // The whole walk is cheap enough to run inline, but the caller wraps it in
 // a goroutine so a large replay file doesn't stall the TUI's first paint.
-func buildIncidentIndex(s *store.Store, snapshots []store.SnapshotInfo) ([]model.IncidentSeverity, error) {
+func buildIncidentIndex(s *store.Store, snapshots []store.SnapshotInfo) (*incidentIndex, error) {
 	if len(snapshots) == 0 {
-		return nil, nil
+		return &incidentIndex{}, nil
 	}
 	rows, err := s.IteratePodHealthRows()
 	if err != nil {
@@ -51,21 +67,25 @@ func buildIncidentIndex(s *store.Store, snapshots []store.SnapshotInfo) ([]model
 		snapIdx[sn.ID] = i
 	}
 
-	out := make([]model.IncidentSeverity, len(snapshots))
+	idx := &incidentIndex{
+		global: make([]model.IncidentSeverity, len(snapshots)),
+		perPod: make(map[string][]model.IncidentSeverity),
+	}
 
 	// Walk pod by pod (contiguous in `rows` thanks to the ORDER BY).
 	type sample struct {
-		idx    int
+		i      int
 		health model.PodHealth
 	}
 	var cur []sample
-	var curKey string
+	var curNs, curName string
 
 	flush := func() {
 		// Need at least two observations to detect a transition.
 		if len(cur) < 2 {
 			return
 		}
+		var podVec []model.IncidentSeverity
 		for i := 1; i < len(cur); i++ {
 			prev := cur[i-1]
 			now := cur[i]
@@ -86,15 +106,14 @@ func buildIncidentIndex(s *store.Store, snapshots []store.SnapshotInfo) ([]model
 				persists := false
 				if i+1 < len(cur) {
 					next := cur[i+1]
-					if next.health == model.HealthHardBad && next.idx == now.idx+1 {
+					if next.health == model.HealthHardBad && next.i == now.i+1 {
 						persists = true
 					}
-				} else {
-					// Pod's last observation is also the file's last snapshot.
-					// Treat as persistent so end-of-recording failures show red.
-					if now.idx == len(out)-1 {
-						persists = true
-					}
+				} else if now.i == len(idx.global)-1 {
+					// Pod's last observation is also the file's last
+					// snapshot. Treat as persistent so end-of-recording
+					// failures show red.
+					persists = true
 				}
 				if persists {
 					sev = model.IncidentRed
@@ -102,26 +121,35 @@ func buildIncidentIndex(s *store.Store, snapshots []store.SnapshotInfo) ([]model
 					sev = model.IncidentYellow
 				}
 			}
-			if sev > out[now.idx] {
-				out[now.idx] = sev
+			if sev > idx.global[now.i] {
+				idx.global[now.i] = sev
 			}
+			if podVec == nil {
+				podVec = make([]model.IncidentSeverity, len(idx.global))
+			}
+			if sev > podVec[now.i] {
+				podVec[now.i] = sev
+			}
+		}
+		if podVec != nil {
+			idx.perPod[curNs+"/"+curName] = podVec
 		}
 	}
 
 	for _, r := range rows {
-		key := r.Namespace + "\x00" + r.Name
-		if key != curKey {
+		if r.Namespace != curNs || r.Name != curName {
 			flush()
-			curKey = key
+			curNs = r.Namespace
+			curName = r.Name
 			cur = cur[:0]
 		}
-		idx, ok := snapIdx[r.SnapshotID]
+		si, ok := snapIdx[r.SnapshotID]
 		if !ok {
 			continue
 		}
-		cur = append(cur, sample{idx: idx, health: model.ClassifyPodHealth(r.Status, r.Ready)})
+		cur = append(cur, sample{i: si, health: model.ClassifyPodHealth(r.Status, r.Ready)})
 	}
 	flush()
 
-	return out, nil
+	return idx, nil
 }
