@@ -24,4 +24,10 @@ var (
 	StyleHeader    = lipgloss.NewStyle().Bold(true).Foreground(colTitle)
 	StyleBorder    = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(colBorder)
 	StyleStatusBar = lipgloss.NewStyle().Foreground(colMuted)
+
+	// Incident markers on the timeline. Yellow = transient or flicker;
+	// Red = persistent failure (CrashLoopBackOff, OOMKilled, not-ready
+	// Running, etc.) that lasted at least two consecutive snapshots.
+	StyleIncidentYellow = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFC107")).Bold(true)
+	StyleIncidentRed    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF3B30")).Bold(true)
 )

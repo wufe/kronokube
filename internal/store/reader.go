@@ -180,6 +180,61 @@ func (s *Store) ResourceTimeline(kind model.Kind, namespace, name string) ([]Sna
 	return out, rows.Err()
 }
 
+// PodHealthRow is a slim projection of the pods table used by the incident
+// detector. Status and Ready are pulled out of cells_json (indices baked
+// into the catalog at model.defPods).
+type PodHealthRow struct {
+	SnapshotID int64
+	Namespace  string
+	Name       string
+	Status     string
+	Ready      string
+}
+
+// IteratePodHealthRows yields every captured pod row in a stable order that
+// groups the same (namespace, name) together and orders snapshots within
+// each pod chronologically — perfect for the per-pod transition scan.
+// Returning a slice (not a callback) keeps the consumer simple; the row
+// count is bounded by snapshots × pods per cluster, well within memory.
+func (s *Store) IteratePodHealthRows() ([]PodHealthRow, error) {
+	rows, err := s.db.Query(`SELECT snapshot_id, namespace, name, cells_json
+		FROM resources WHERE kind = 'pods'
+		ORDER BY namespace, name, snapshot_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []PodHealthRow
+	for rows.Next() {
+		var snapID int64
+		var ns, name, cellsJSON string
+		if err := rows.Scan(&snapID, &ns, &name, &cellsJSON); err != nil {
+			return nil, err
+		}
+		var cells []string
+		if err := json.Unmarshal([]byte(cellsJSON), &cells); err != nil {
+			return nil, fmt.Errorf("decode cells for %s/%s: %w", ns, name, err)
+		}
+		// Pod catalog (see model.defPods): cells = [NAMESPACE, NAME, READY, STATUS, ...]
+		var ready, status string
+		if len(cells) > 2 {
+			ready = cells[2]
+		}
+		if len(cells) > 3 {
+			status = cells[3]
+		}
+		out = append(out, PodHealthRow{
+			SnapshotID: snapID,
+			Namespace:  ns,
+			Name:       name,
+			Status:     status,
+			Ready:      ready,
+		})
+	}
+	return out, rows.Err()
+}
+
 // PodLogsForSnapshot returns metadata for every pod log captured at snapID.
 // Content is left nil — call FetchPodLog to lazy-load the bytes.
 func (s *Store) PodLogsForSnapshot(snapID int64, namespace string) ([]model.PodLog, error) {

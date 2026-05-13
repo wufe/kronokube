@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wufe/kronokube/internal/model"
 	"github.com/wufe/kronokube/internal/store"
 )
 
@@ -13,8 +14,12 @@ import (
 // the available pixel width; snapshots is the full list; cur is the index
 // of the currently-displayed snapshot. following controls the cursor glyph:
 // a solid ● when the view auto-advances with new snapshots, a hollow ◇ when
-// the user has paused on a specific point.
-func renderTimelineBar(width int, snapshots []store.SnapshotInfo, cur int, following bool) string {
+// the user has paused on a specific point. incidents is a parallel-to-
+// snapshots vector of severities; positions where a snapshot transitioned
+// some pod from healthy to unhealthy are drawn in yellow (transient/
+// flicker) or red (persistent failure). Red beats yellow if multiple
+// snapshots map to the same bar character. Cursor always wins.
+func renderTimelineBar(width int, snapshots []store.SnapshotInfo, cur int, following bool, incidents []model.IncidentSeverity) string {
 	if len(snapshots) == 0 {
 		return StyleMuted.Render("(no snapshots yet)")
 	}
@@ -41,7 +46,7 @@ func renderTimelineBar(width int, snapshots []store.SnapshotInfo, cur int, follo
 		pos = barWidth - 1
 	}
 
-	// Place a few tick markers spaced along the bar; ◆ at first/last/mid.
+	// Place a few tick markers spaced along the bar; ┼ at first/last/mid.
 	for _, idx := range tickPositions(barWidth, 5) {
 		bar[idx] = '┼'
 	}
@@ -50,6 +55,62 @@ func renderTimelineBar(width int, snapshots []store.SnapshotInfo, cur int, follo
 		cursor = '◇'
 	}
 	bar[pos] = cursor
+
+	// Bucket per-snapshot severity into per-character severity. Multiple
+	// snapshots collapse onto one position when there are many of them; we
+	// keep the worst.
+	posSev := make([]model.IncidentSeverity, barWidth)
+	if len(incidents) > 0 {
+		if len(snapshots) == 1 {
+			if incidents[0] > posSev[0] {
+				posSev[0] = incidents[0]
+			}
+		} else {
+			n := min(len(incidents), len(snapshots))
+			for i := 0; i < n; i++ {
+				sev := incidents[i]
+				if sev == model.IncidentNone {
+					continue
+				}
+				p := (i * (barWidth - 1)) / (len(snapshots) - 1)
+				if p < 0 {
+					p = 0
+				}
+				if p >= barWidth {
+					p = barWidth - 1
+				}
+				if sev > posSev[p] {
+					posSev[p] = sev
+				}
+			}
+		}
+	}
+
+	// Assemble the bar character-by-character with per-position color.
+	// Where an incident exists we promote the glyph to '│' so it visually
+	// stands out from the baseline '─'. The cursor glyph still wins on its
+	// own position regardless of incidents.
+	var rendered strings.Builder
+	for i, r := range bar {
+		isCursor := i == pos
+		if !isCursor && posSev[i] != model.IncidentNone {
+			r = '│'
+		}
+		var style = StyleTimeline
+		switch {
+		case isCursor && posSev[i] == model.IncidentRed:
+			style = StyleIncidentRed
+		case isCursor && posSev[i] == model.IncidentYellow:
+			style = StyleIncidentYellow
+		case isCursor:
+			style = StyleTimeline
+		case posSev[i] == model.IncidentRed:
+			style = StyleIncidentRed
+		case posSev[i] == model.IncidentYellow:
+			style = StyleIncidentYellow
+		}
+		rendered.WriteString(style.Render(string(r)))
+	}
 
 	// Build the label row underneath (sparse — start, cursor, end).
 	labels := make([]rune, barWidth)
@@ -61,7 +122,7 @@ func renderTimelineBar(width int, snapshots []store.SnapshotInfo, cur int, follo
 	placeLabelCenteredAt(labels, pos, curTS)
 	placeLabelRight(labels, barWidth-1, snapshots[len(snapshots)-1].Timestamp.Format("15:04:05"))
 
-	return StyleTimeline.Render(string(bar)) + StyleStatusBar.Render(counter) + "\n" + StyleMuted.Render(string(labels))
+	return rendered.String() + StyleStatusBar.Render(counter) + "\n" + StyleMuted.Render(string(labels))
 }
 
 func tickPositions(width, n int) []int {

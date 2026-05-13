@@ -53,6 +53,12 @@ type Model struct {
 	curSnap   int  // index into snapshots
 	follow    bool // jump to newest on each tick (default true in live mode)
 
+	// incidents is a per-snapshot severity vector parallel to `snapshots`.
+	// Built in a goroutine on snapshotsLoadedMsg so opening a 1k-snapshot
+	// .kk file doesn't stall the first paint. May lag behind `snapshots` by
+	// up to one rebuild; the rebuild is cheap and re-runs on every refresh.
+	incidents []model.IncidentSeverity
+
 	// Resource kind navigation
 	kinds   []model.ResourceDef // filtered: excludes Events; Events has its own view
 	curKind int
@@ -194,6 +200,14 @@ type namespacesLoadedMsg struct {
 	namespaces []string
 }
 
+// incidentsLoadedMsg delivers an updated severity vector built in a
+// goroutine. The vector is parallel to model.snapshots at build time;
+// applying it when the live timeline has already grown is fine — we just
+// pad with IncidentNone, and the next rebuild fills the new entries.
+type incidentsLoadedMsg struct {
+	incidents []model.IncidentSeverity
+}
+
 type clockTickMsg struct{}
 
 type errMsg struct{ err error }
@@ -308,6 +322,19 @@ func loadChangeTimelineCmd(s *store.Store, kind model.Kind, ns, name string) tea
 	}
 }
 
+func rebuildIncidentsCmd(s *store.Store, snapshots []store.SnapshotInfo) tea.Cmd {
+	// Capture a snapshot slice so the goroutine doesn't race with the
+	// model's slice header. The snapshot data itself is immutable per ID.
+	snaps := append([]store.SnapshotInfo(nil), snapshots...)
+	return func() tea.Msg {
+		out, err := buildIncidentIndex(s, snaps)
+		if err != nil {
+			return errMsg{err}
+		}
+		return incidentsLoadedMsg{incidents: out}
+	}
+}
+
 func loadNamespacesCmd(s *store.Store) tea.Cmd {
 	return func() tea.Msg {
 		ns, err := s.Namespaces()
@@ -345,7 +372,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.curSnap >= len(m.snapshots) {
 			m.curSnap = len(m.snapshots) - 1
 		}
-		return m, m.refreshRowsCmd()
+		return m, tea.Batch(m.refreshRowsCmd(), rebuildIncidentsCmd(m.store, m.snapshots))
+
+	case incidentsLoadedMsg:
+		m.incidents = msg.incidents
+		return m, nil
 
 	case captureTickMsg:
 		// New snapshot recorded. Reload list, then keep listening.
@@ -782,7 +813,7 @@ func (m Model) renderMain() string {
 		b.WriteString("\n")
 	}
 	// Timeline
-	b.WriteString(renderTimelineBar(m.width, m.snapshots, m.curSnap, m.follow || !m.live))
+	b.WriteString(renderTimelineBar(m.width, m.snapshots, m.curSnap, m.follow || !m.live, m.incidents))
 	b.WriteString("\n")
 	// Status bar
 	b.WriteString(m.renderStatus())
