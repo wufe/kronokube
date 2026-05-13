@@ -220,6 +220,11 @@ type drillState struct {
 	// originKind is the index in m.kinds the user was browsing when they
 	// drilled in. Esc restores it.
 	originKind int
+	// originSelRow / originScroll snapshot the table cursor position at
+	// the moment of Enter so Esc lands back on the same row instead of
+	// resetting to the top.
+	originSelRow int
+	originScroll int
 	// podSet is the filter — keys are "namespace/name". Recomputed on every
 	// snapshot change while drill is active.
 	podSet map[string]bool
@@ -234,7 +239,11 @@ type drillLoadedMsg struct {
 	parentNs   string
 	parentName string
 	originKind int
-	podSet     map[string]bool
+	// origin{SelRow,Scroll} are -1 on subsequent (snap-change) refreshes,
+	// signalling the Update handler not to overwrite the saved cursor.
+	originSelRow int
+	originScroll int
+	podSet       map[string]bool
 }
 
 // incidentsLoadedMsg delivers an updated severity vector built in a
@@ -362,33 +371,38 @@ func loadChangeTimelineCmd(s *store.Store, kind model.Kind, ns, name string) tea
 }
 
 // drillDownCmd computes the pod filter for `parentKind/ns/name` at snapID
-// in a goroutine and delivers it via drillLoadedMsg. originKind is carried
-// through so the message handler can record where to restore on Esc.
-func drillDownCmd(s *store.Store, snapID int64, parentKind model.Kind, parentNs, parentName string, originKind int) tea.Cmd {
+// in a goroutine and delivers it via drillLoadedMsg. originKind and the
+// origin cursor coordinates are carried through so the message handler
+// can record where to restore on Esc. Pass originSelRow == -1 for refresh
+// (snap-change) calls so the saved cursor isn't overwritten.
+func drillDownCmd(s *store.Store, snapID int64, parentKind model.Kind, parentNs, parentName string, originKind, originSelRow, originScroll int) tea.Cmd {
 	return func() tea.Msg {
 		set, err := computePodFilter(s, snapID, parentKind, parentNs, parentName)
 		if err != nil {
 			return errMsg{err}
 		}
 		return drillLoadedMsg{
-			parentKind: parentKind,
-			parentNs:   parentNs,
-			parentName: parentName,
-			originKind: originKind,
-			podSet:     set,
+			parentKind:   parentKind,
+			parentNs:     parentNs,
+			parentName:   parentName,
+			originKind:   originKind,
+			originSelRow: originSelRow,
+			originScroll: originScroll,
+			podSet:       set,
 		}
 	}
 }
 
 // drillRefreshCmd recomputes the pod set for the *current* drill at the
 // (now-changed) snapshot ID. Same as drillDownCmd but reuses the existing
-// origin kind.
+// origin info and signals (via -1) that the saved cursor must be kept.
 func (m Model) drillRefreshCmd() tea.Cmd {
 	if m.drill == nil || len(m.snapshots) == 0 {
 		return nil
 	}
 	snapID := m.snapshots[m.curSnap].ID
-	return drillDownCmd(m.store, snapID, m.drill.parentKind, m.drill.parentNs, m.drill.parentName, m.drill.originKind)
+	return drillDownCmd(m.store, snapID, m.drill.parentKind, m.drill.parentNs, m.drill.parentName,
+		m.drill.originKind, -1, -1)
 }
 
 func rebuildIncidentsCmd(s *store.Store, snapshots []store.SnapshotInfo) tea.Cmd {
@@ -449,21 +463,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case drillLoadedMsg:
-		m.drill = &drillState{
-			parentKind: msg.parentKind,
-			parentNs:   msg.parentNs,
-			parentName: msg.parentName,
-			originKind: msg.originKind,
-			podSet:     msg.podSet,
-		}
-		// Force the table to the Pods kind for the drill view.
-		for i, d := range m.kinds {
-			if d.Kind == "pods" {
-				m.curKind = i
-				break
+		// Snap-change refreshes carry originSelRow == -1 — keep the
+		// existing saved cursor in that case. Otherwise this is a fresh
+		// Enter and we record where the user was before drilling.
+		first := m.drill == nil || msg.originSelRow >= 0
+		if first {
+			m.drill = &drillState{
+				parentKind:   msg.parentKind,
+				parentNs:     msg.parentNs,
+				parentName:   msg.parentName,
+				originKind:   msg.originKind,
+				originSelRow: msg.originSelRow,
+				originScroll: msg.originScroll,
 			}
+			// Force the table to the Pods kind for the drill view, and
+			// reset the cursor so we start at the top of the focused list.
+			for i, d := range m.kinds {
+				if d.Kind == "pods" {
+					m.curKind = i
+					break
+				}
+			}
+			m.selRow, m.scroll = 0, 0
 		}
-		m.selRow, m.scroll = 0, 0
+		m.drill.podSet = msg.podSet
 		return m, m.refreshRowsCmd()
 
 	case captureTickMsg:
@@ -723,23 +746,27 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Esc inside the table view exits an active drill-down, restoring the
-	// originating kind and unblocking the kind tabs. Done here (before the
-	// switch) so it takes priority over any other Esc handling.
+	// originating kind, cursor position, and scroll offset so the user
+	// lands exactly on the parent row they came from. Done here (before
+	// the switch) so it takes priority over any other Esc handling.
 	if m.drill != nil && msg.Type == tea.KeyEsc {
-		origin := m.drill.originKind
+		d := m.drill
 		m.drill = nil
-		m.curKind = origin
-		m.selRow, m.scroll = 0, 0
+		m.curKind = d.originKind
+		m.selRow = d.originSelRow
+		m.scroll = d.originScroll
 		return m, m.refreshRowsCmd()
 	}
 
 	// Enter on a drillable parent (Deployment, StatefulSet, …, Node) shows
 	// only its pods. We compute the pod set asynchronously so a slow store
-	// doesn't stall the UI.
+	// doesn't stall the UI. We also capture the current cursor position so
+	// Esc can land back on the same parent row.
 	if m.drill == nil && msg.Type == tea.KeyEnter {
 		if r := m.currentRow(); r != nil && isDrillable(r.Kind) {
 			snapID := m.snapshots[m.curSnap].ID
-			return m, drillDownCmd(m.store, snapID, r.Kind, r.Namespace, r.Name, m.curKind)
+			return m, drillDownCmd(m.store, snapID, r.Kind, r.Namespace, r.Name,
+				m.curKind, m.selRow, m.scroll)
 		}
 	}
 
