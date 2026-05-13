@@ -24,14 +24,16 @@ type KeyMap struct {
 	YAML        key.Binding
 	Wrap        key.Binding
 	Back        key.Binding
-	PrevSnap     key.Binding
-	NextSnap     key.Binding
-	PrevSnapFast key.Binding
-	NextSnapFast key.Binding
-	PrevSnapPage key.Binding
-	NextSnapPage key.Binding
-	JumpStart    key.Binding
-	JumpEnd      key.Binding
+	PrevSnap         key.Binding
+	NextSnap         key.Binding
+	PrevSnapFast     key.Binding
+	NextSnapFast     key.Binding
+	PrevSnapPage     key.Binding
+	NextSnapPage     key.Binding
+	PrevSnapIncident key.Binding
+	NextSnapIncident key.Binding
+	JumpStart        key.Binding
+	JumpEnd          key.Binding
 	Live        key.Binding
 	NamespaceSw key.Binding
 }
@@ -62,8 +64,15 @@ func DefaultKeyMap() KeyMap {
 		NextSnap:     key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "next snap")),
 		PrevSnapFast: key.NewBinding(key.WithKeys("shift+left"), key.WithHelp("⇧←", "back 10 snaps")),
 		NextSnapFast: key.NewBinding(key.WithKeys("shift+right"), key.WithHelp("⇧→", "forward 10 snaps")),
-		PrevSnapPage: key.NewBinding(key.WithKeys("<"), key.WithHelp("<", "back 1% of timeline")),
-		NextSnapPage: key.NewBinding(key.WithKeys(">"), key.WithHelp(">", "forward 1% of timeline")),
+		PrevSnapPage:     key.NewBinding(key.WithKeys("<"), key.WithHelp("<", "back 1% of timeline")),
+		NextSnapPage:     key.NewBinding(key.WithKeys(">"), key.WithHelp(">", "forward 1% of timeline")),
+		// , and . for incident-to-incident jumps. Ctrl+arrow would be the
+		// natural choice but doesn't pass through reliably on macOS
+		// terminals — the OS or terminal app eats the chord before it
+		// reaches Bubble Tea. , / . are bare printable characters, so
+		// they survive every layer cleanly.
+		PrevSnapIncident: key.NewBinding(key.WithKeys(","), key.WithHelp(",", "prev incident")),
+		NextSnapIncident: key.NewBinding(key.WithKeys("."), key.WithHelp(".", "next incident")),
 		JumpStart:    key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("C-a", "first snap")),
 		JumpEnd:      key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("C-e", "last snap")),
 		Live:        key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "jump to live")),

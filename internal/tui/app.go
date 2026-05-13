@@ -817,6 +817,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.jumpSnap(-m.pageStep())
 	case key.Matches(msg, k.NextSnapPage):
 		return m.jumpSnap(+m.pageStep())
+	case key.Matches(msg, k.PrevSnapIncident):
+		return m.jumpToNearestIncident(-1)
+	case key.Matches(msg, k.NextSnapIncident):
+		return m.jumpToNearestIncident(+1)
 	case key.Matches(msg, k.JumpStart):
 		m.curSnap = 0
 		m.follow = false
@@ -1063,7 +1067,7 @@ func shortFile(p string) string {
 }
 
 func (m Model) renderStatus() string {
-	help := "tab: kind  /: filter  enter: drill  d: describe  y: yaml  e: events  t: changes  l: logs  n: ns  ←/→: 1  ⇧←/⇧→: 10  </>: 1%  L: live  ?: help  C-c: quit"
+	help := "tab: kind  /: filter  enter: drill  d: describe  y: yaml  e: events  t: changes  l: logs  n: ns  ←/→: 1  ⇧←/⇧→: 10  </>: 1%  ,/.: incident  L: live  ?: help  C-c: quit"
 	if time.Now().Before(m.flashUntil) && m.statusFlash != "" {
 		return StyleOK.Render(m.statusFlash) + "  " + StyleMuted.Render(help)
 	}
@@ -1227,6 +1231,7 @@ TIMELINE (REPLAY)
   ← →               prev / next snapshot (one at a time)
   ⇧← ⇧→             jump ±10 snapshots
   < >               jump ±1% of timeline (min 25 snaps)
+  , .               jump to prev / next snapshot with an incident
   ctrl-a / ctrl-e   first / last snapshot
   L                 jump to live (resume follow)
 
@@ -1386,6 +1391,51 @@ func (m Model) jumpSnap(delta int) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, c)
 	}
 	return m, tea.Batch(cmds...)
+}
+
+// jumpToNearestIncident walks the (drill-aware) incident vector and
+// snaps the timeline cursor to the closest entry whose severity isn't
+// IncidentNone in `direction` (+1 forward, -1 backward). Flashes a
+// status hint if there's nothing to jump to in that direction so the
+// keypress doesn't feel like a no-op.
+func (m Model) jumpToNearestIncident(direction int) (tea.Model, tea.Cmd) {
+	incidents := m.effectiveIncidents()
+	if len(incidents) == 0 || len(m.snapshots) == 0 || direction == 0 {
+		return m, nil
+	}
+	lim := len(incidents)
+	if lim > len(m.snapshots) {
+		lim = len(m.snapshots)
+	}
+	target := -1
+	if direction > 0 {
+		for i := m.curSnap + 1; i < lim; i++ {
+			if incidents[i] != model.IncidentNone {
+				target = i
+				break
+			}
+		}
+	} else {
+		for i := m.curSnap - 1; i >= 0; i-- {
+			if i >= lim {
+				continue
+			}
+			if incidents[i] != model.IncidentNone {
+				target = i
+				break
+			}
+		}
+	}
+	if target < 0 {
+		dir := "after"
+		if direction < 0 {
+			dir = "before"
+		}
+		m.statusFlash = "no further incidents " + dir + " this snapshot"
+		m.flashUntil = time.Now().Add(2 * time.Second)
+		return m, nil
+	}
+	return m.jumpSnap(target - m.curSnap)
 }
 
 // pageStep is "about 1% of the timeline", min 25. Scales naturally:

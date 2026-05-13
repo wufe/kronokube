@@ -88,6 +88,10 @@ Common flags:
     ← →                 prev / next snapshot (one at a time)
     ⇧← ⇧→               jump ±10 snapshots
     < >                 jump ±1% of timeline (min 25 snaps)
+    , .                 jump to prev / next snapshot with an incident
+                        (yellow or red on the timeline). Honors the
+                        current drill-down — if you're focused on a
+                        StatefulSet, you only land on its pods' incidents.
     Ctrl-A / Ctrl-E     first / last snapshot
     L                   jump to live (resume follow)
 
