@@ -92,6 +92,9 @@ Common flags:
     e                   events for selected resource (across whole file)
     t                   change timeline for selected resource
     l                   pod logs at this snapshot (requires pod_logs.enabled)
+    enter               drill into a parent (Deployment / StS / DS / RS /
+                        Job / CronJob / Node) — show only its pods
+    esc                 unwind drill-down / cancel filter / close detail
 
     ?                   help        Ctrl-C  quit       esc  back
 

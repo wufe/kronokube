@@ -53,6 +53,12 @@ type Model struct {
 	curSnap   int  // index into snapshots
 	follow    bool // jump to newest on each tick (default true in live mode)
 
+	// drill is non-nil while the user has "entered" a parent resource
+	// (Deployment, StatefulSet, Node, …) and is viewing its pods. The pods
+	// table is restricted to the keys in drill.podSet; the kind tabs are
+	// locked; Esc unwinds back to the originating kind.
+	drill *drillState
+
 	// incidents is a per-snapshot severity vector parallel to `snapshots`.
 	// Built in a goroutine on snapshotsLoadedMsg so opening a 1k-snapshot
 	// .kk file doesn't stall the first paint. May lag behind `snapshots` by
@@ -200,6 +206,31 @@ type namespacesLoadedMsg struct {
 	namespaces []string
 }
 
+// drillState holds the currently-active drill-down filter.
+type drillState struct {
+	parentKind model.Kind
+	parentNs   string
+	parentName string
+	// originKind is the index in m.kinds the user was browsing when they
+	// drilled in. Esc restores it.
+	originKind int
+	// podSet is the filter — keys are "namespace/name". Recomputed on every
+	// snapshot change while drill is active.
+	podSet map[string]bool
+}
+
+// drillLoadedMsg delivers the computed pod set for the active drill at the
+// current snapshot. Sent both when the user first presses Enter on a
+// parent resource and when the timeline cursor moves to a new snapshot
+// while the drill is active.
+type drillLoadedMsg struct {
+	parentKind model.Kind
+	parentNs   string
+	parentName string
+	originKind int
+	podSet     map[string]bool
+}
+
 // incidentsLoadedMsg delivers an updated severity vector built in a
 // goroutine. The vector is parallel to model.snapshots at build time;
 // applying it when the live timeline has already grown is fine — we just
@@ -322,6 +353,36 @@ func loadChangeTimelineCmd(s *store.Store, kind model.Kind, ns, name string) tea
 	}
 }
 
+// drillDownCmd computes the pod filter for `parentKind/ns/name` at snapID
+// in a goroutine and delivers it via drillLoadedMsg. originKind is carried
+// through so the message handler can record where to restore on Esc.
+func drillDownCmd(s *store.Store, snapID int64, parentKind model.Kind, parentNs, parentName string, originKind int) tea.Cmd {
+	return func() tea.Msg {
+		set, err := computePodFilter(s, snapID, parentKind, parentNs, parentName)
+		if err != nil {
+			return errMsg{err}
+		}
+		return drillLoadedMsg{
+			parentKind: parentKind,
+			parentNs:   parentNs,
+			parentName: parentName,
+			originKind: originKind,
+			podSet:     set,
+		}
+	}
+}
+
+// drillRefreshCmd recomputes the pod set for the *current* drill at the
+// (now-changed) snapshot ID. Same as drillDownCmd but reuses the existing
+// origin kind.
+func (m Model) drillRefreshCmd() tea.Cmd {
+	if m.drill == nil || len(m.snapshots) == 0 {
+		return nil
+	}
+	snapID := m.snapshots[m.curSnap].ID
+	return drillDownCmd(m.store, snapID, m.drill.parentKind, m.drill.parentNs, m.drill.parentName, m.drill.originKind)
+}
+
 func rebuildIncidentsCmd(s *store.Store, snapshots []store.SnapshotInfo) tea.Cmd {
 	// Capture a snapshot slice so the goroutine doesn't race with the
 	// model's slice header. The snapshot data itself is immutable per ID.
@@ -377,6 +438,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case incidentsLoadedMsg:
 		m.incidents = msg.incidents
 		return m, nil
+
+	case drillLoadedMsg:
+		m.drill = &drillState{
+			parentKind: msg.parentKind,
+			parentNs:   msg.parentNs,
+			parentName: msg.parentName,
+			originKind: msg.originKind,
+			podSet:     msg.podSet,
+		}
+		// Force the table to the Pods kind for the drill view.
+		for i, d := range m.kinds {
+			if d.Kind == "pods" {
+				m.curKind = i
+				break
+			}
+		}
+		m.selRow, m.scroll = 0, 0
+		return m, m.refreshRowsCmd()
 
 	case captureTickMsg:
 		// New snapshot recorded. Reload list, then keep listening.
@@ -463,13 +542,26 @@ func (m Model) refreshRowsCmd() tea.Cmd {
 }
 
 func (m *Model) applyFilter() {
+	base := m.allRows
+	// Drill-down filter takes priority: while drilled, only pods in the
+	// computed set are visible. The drill is only meaningful when looking
+	// at Pods (we forced curKind there), so this is a no-op for other kinds.
+	if m.drill != nil && m.curKind < len(m.kinds) && m.kinds[m.curKind].Kind == "pods" {
+		filtered := make([]model.Row, 0, len(base))
+		for _, r := range base {
+			if m.drill.podSet[r.Namespace+"/"+r.Name] {
+				filtered = append(filtered, r)
+			}
+		}
+		base = filtered
+	}
 	f := strings.ToLower(strings.TrimSpace(m.filterInput.Value()))
 	if f == "" {
-		m.rows = m.allRows
+		m.rows = base
 		return
 	}
 	m.rows = m.rows[:0]
-	for _, r := range m.allRows {
+	for _, r := range base {
 		hay := strings.ToLower(r.Namespace + " " + r.Name + " " + strings.Join(r.Cells, " "))
 		if strings.Contains(hay, f) {
 			m.rows = append(m.rows, r)
@@ -621,6 +713,27 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Esc inside the table view exits an active drill-down, restoring the
+	// originating kind and unblocking the kind tabs. Done here (before the
+	// switch) so it takes priority over any other Esc handling.
+	if m.drill != nil && msg.Type == tea.KeyEsc {
+		origin := m.drill.originKind
+		m.drill = nil
+		m.curKind = origin
+		m.selRow, m.scroll = 0, 0
+		return m, m.refreshRowsCmd()
+	}
+
+	// Enter on a drillable parent (Deployment, StatefulSet, …, Node) shows
+	// only its pods. We compute the pod set asynchronously so a slow store
+	// doesn't stall the UI.
+	if m.drill == nil && msg.Type == tea.KeyEnter {
+		if r := m.currentRow(); r != nil && isDrillable(r.Kind) {
+			snapID := m.snapshots[m.curSnap].ID
+			return m, drillDownCmd(m.store, snapID, r.Kind, r.Namespace, r.Name, m.curKind)
+		}
+	}
+
 	// Main table view bindings.
 	switch {
 	case key.Matches(msg, k.Quit):
@@ -633,6 +746,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filterInput.Focus()
 		return m, nil
 	case key.Matches(msg, k.PrevKind):
+		// Kind tabs are locked while a drill is active — the user must Esc
+		// out of the focused view first.
+		if m.drill != nil {
+			m.statusFlash = "kind switch disabled while drilled — esc to unwind"
+			m.flashUntil = time.Now().Add(2 * time.Second)
+			return m, nil
+		}
 		if m.curKind > 0 {
 			m.curKind--
 		} else {
@@ -641,6 +761,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.selRow, m.scroll = 0, 0
 		return m, m.refreshRowsCmd()
 	case key.Matches(msg, k.NextKind):
+		if m.drill != nil {
+			m.statusFlash = "kind switch disabled while drilled — esc to unwind"
+			m.flashUntil = time.Now().Add(2 * time.Second)
+			return m, nil
+		}
 		m.curKind = (m.curKind + 1) % len(m.kinds)
 		m.selRow, m.scroll = 0, 0
 		return m, m.refreshRowsCmd()
@@ -785,6 +910,17 @@ func (m Model) renderMain() string {
 	}
 	b.WriteString(joinKindTabs(names, m.curKind))
 	b.WriteString("\n")
+	// Drill banner — visible only while a drill-down is active. Yellow so
+	// it can't be missed: the kind tabs are locked and the table content
+	// is narrowed, both of which are surprising without a label.
+	if m.drill != nil {
+		count := len(m.drill.podSet)
+		label := fmt.Sprintf(" ▶ pods of %s %s/%s  (%d match%s)  —  esc to clear ",
+			drillLabel(m.drill.parentKind), m.drill.parentNs, m.drill.parentName,
+			count, plural(count))
+		b.WriteString(StyleIncidentYellow.Render(label))
+		b.WriteString("\n")
+	}
 	// Filter line (always rendered for layout stability)
 	if m.filtering {
 		b.WriteString(m.filterInput.View())
@@ -871,7 +1007,7 @@ func shortFile(p string) string {
 }
 
 func (m Model) renderStatus() string {
-	help := "tab: kind  /: filter  d: describe  y: yaml  e: events  t: changes  l: logs  n: ns  ←/→: 1  ⇧←/⇧→: 10  </>: 1%  L: live  ?: help  C-c: quit"
+	help := "tab: kind  /: filter  enter: drill  d: describe  y: yaml  e: events  t: changes  l: logs  n: ns  ←/→: 1  ⇧←/⇧→: 10  </>: 1%  L: live  ?: help  C-c: quit"
 	if time.Now().Before(m.flashUntil) && m.statusFlash != "" {
 		return StyleOK.Render(m.statusFlash) + "  " + StyleMuted.Render(help)
 	}
@@ -881,6 +1017,10 @@ func (m Model) renderStatus() string {
 func (m Model) tableVisibleRows() int {
 	// Header(1) + tabs(1) + filter(1) + table-header(1) + warn(0/1) + tl-bar(2) + status(1).
 	reserved := 8
+	if m.drill != nil {
+		// Drill banner consumes one extra row above the filter line.
+		reserved++
+	}
 	v := m.height - reserved
 	if v < 5 {
 		v = 5
@@ -1040,6 +1180,8 @@ INSPECT
   e                 events for selected resource (across all snapshots)
   t                 changes timeline for selected resource
   l                 pod logs at this snapshot (when pod_logs.enabled in config)
+  enter             drill into a parent (Deployment / StS / DS / RS / Job /
+                    CronJob / Node) — shows just its pods; esc unwinds
   w                 toggle line wrap inside the logs view
   enter             open the current log tail in loglens (if loglens is on PATH)
   gg / G            (inside detail views) jump to first / last line
@@ -1183,7 +1325,11 @@ func (m Model) jumpSnap(delta int) (tea.Model, tea.Cmd) {
 	} else {
 		m.follow = false
 	}
-	return m, m.refreshRowsCmd()
+	cmds := []tea.Cmd{m.refreshRowsCmd()}
+	if c := m.drillRefreshCmd(); c != nil {
+		cmds = append(cmds, c)
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // pageStep is "about 1% of the timeline", min 25. Scales naturally:
@@ -1194,6 +1340,13 @@ func (m Model) pageStep() int {
 		step = 25
 	}
 	return step
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "es"
 }
 
 // --- small helpers ---
