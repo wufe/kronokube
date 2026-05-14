@@ -216,6 +216,10 @@ type detailLoadedMsg struct {
 	// podLogTarget is "<ns>/<pod>" so the model can compare against the
 	// currently-selected resource and invalidate stale data after navigation.
 	podLogTarget string
+	// indicatorLine is the 0-based line of a special marker inside content
+	// that the viewport should auto-scroll to. -1 = none. Currently used by
+	// viewEvents to surface the snapshot-time marker.
+	indicatorLine int
 }
 
 type namespacesLoadedMsg struct {
@@ -327,7 +331,7 @@ func loadDescribeCmd(s *store.Store, snapID int64, kind model.Kind, ns, name, ui
 	}
 }
 
-func loadEventsCmd(s *store.Store, uid string, snapID int64, kind model.Kind, ns, name string) tea.Cmd {
+func loadEventsCmd(s *store.Store, uid string, snapID int64, kind model.Kind, ns, name string, snapTs time.Time) tea.Cmd {
 	return func() tea.Msg {
 		var evs []model.Event
 		if uid != "" {
@@ -341,7 +345,8 @@ func loadEventsCmd(s *store.Store, uid string, snapID int64, kind model.Kind, ns
 				}
 			}
 		}
-		return detailLoadedMsg{view: viewEvents, events: evs, content: renderEventsList(kind, ns, name, evs)}
+		content, indicator := renderEventsList(kind, ns, name, evs, snapTs)
+		return detailLoadedMsg{view: viewEvents, events: evs, content: content, indicatorLine: indicator}
 	}
 }
 
@@ -542,6 +547,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.view == viewLogs {
 			m.logsPL = msg.podLog
 			m.logsTarget = msg.podLogTarget
+		}
+		if msg.indicatorLine >= 0 {
+			// Park the marker roughly 1/3 down the viewport so the user
+			// sees a bit of "after" context above and the at-snapshot
+			// events right below it.
+			visible := m.height - 4
+			if visible < 5 {
+				visible = 5
+			}
+			target := msg.indicatorLine - visible/3
+			if target < 0 {
+				target = 0
+			}
+			m.detailScroll = target
 		}
 		return m, nil
 
@@ -942,7 +961,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, k.Events):
 		if r := m.currentRow(); r != nil {
 			m.captureSelection(*r)
-			return m, loadEventsCmd(m.store, r.UID, m.snapshots[m.curSnap].ID, r.Kind, r.Namespace, r.Name)
+			return m, loadEventsCmd(m.store, r.UID, m.snapshots[m.curSnap].ID, r.Kind, r.Namespace, r.Name, m.snapshots[m.curSnap].Timestamp)
 		}
 	case key.Matches(msg, k.Timeline):
 		if r := m.currentRow(); r != nil {
@@ -1334,19 +1353,34 @@ SAFETY
 // renderEventsList is used as the "content" payload of detailLoadedMsg for the
 // events view. It is a top-level function (not method) so it sits next to its
 // peers in describe.go but doesn't need Model state.
-func renderEventsList(kind model.Kind, ns, name string, events []model.Event) string {
+// renderEventsList returns the rendered content plus the 0-based line index
+// of the snapshot-time marker (or -1 if no marker was drawn). The marker
+// separates events with LastTimestamp > snapTs (above, "after snapshot")
+// from those at-or-before snapTs (below). Sort is newest-first.
+func renderEventsList(kind model.Kind, ns, name string, events []model.Event, snapTs time.Time) (string, int) {
 	var b strings.Builder
 	b.WriteString(StyleTitle.Render(fmt.Sprintf("Events for %s %s/%s — %d total", kind, ns, name, len(events))))
 	b.WriteString("\n\n")
 	if len(events) == 0 {
 		b.WriteString(StyleMuted.Render("<none captured>"))
-		return b.String()
+		return b.String(), -1
 	}
-	// Sort newest first.
 	sort.SliceStable(events, func(i, j int) bool {
 		return events[i].LastTimestamp.After(events[j].LastTimestamp)
 	})
+
+	markerLine := -1
+	markerEmitted := snapTs.IsZero()
+	emitMarker := func() {
+		markerLine = strings.Count(b.String(), "\n")
+		fmt.Fprintf(&b, "%s\n\n", StyleTimeline.Render(fmt.Sprintf("─── snapshot @ %s ───", snapTs.Format(time.RFC3339))))
+		markerEmitted = true
+	}
+
 	for _, e := range events {
+		if !markerEmitted && !e.LastTimestamp.After(snapTs) {
+			emitMarker()
+		}
 		typ := e.Type
 		switch typ {
 		case "Warning":
@@ -1361,7 +1395,10 @@ func renderEventsList(kind model.Kind, ns, name string, events []model.Event) st
 		fmt.Fprintf(&b, "  %s  %s  %s  ×%d\n", ts, typ, e.Reason, e.Count)
 		fmt.Fprintf(&b, "    %s\n\n", e.Message)
 	}
-	return b.String()
+	if !markerEmitted {
+		emitMarker()
+	}
+	return b.String(), markerLine
 }
 
 // renderChangeTimeline lists snapshots in which this resource visibly changed.
