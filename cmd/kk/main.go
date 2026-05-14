@@ -18,6 +18,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -29,6 +31,18 @@ import (
 	"github.com/wufe/kronokube/internal/tui"
 )
 
+// Overridable at build time:
+//
+//	go build -ldflags "-X main.version=v0.2.0 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" ./cmd/kk
+//
+// When unset (e.g. `go install` or `go run`), runVersion falls back to
+// runtime/debug.ReadBuildInfo so the binary still prints something useful.
+var (
+	version = "dev"
+	commit  = ""
+	date    = ""
+)
+
 const usage = `kk — KronoKube, a read-only Kubernetes time machine
 
 Commands:
@@ -36,6 +50,7 @@ Commands:
   replay    Open an existing .kk file and scrub through its history
   shrink    Strip non-essential data (logs / describe / yaml) from healthy pods
   safety    Print the kubectl allowlist (audit aid)
+  version   Print the kk version and build info
 
 Run "kk <command> -h" for command-specific flags.`
 
@@ -53,6 +68,8 @@ func main() {
 		runShrink(os.Args[2:])
 	case "safety", "audit":
 		runSafetyAudit()
+	case "version", "--version", "-v":
+		runVersion()
 	case "-h", "--help", "help":
 		fmt.Println(usage)
 	default:
@@ -261,6 +278,45 @@ func runSafetyAudit() {
 		}
 		fmt.Printf("  kubectl %-40s  %s\n", strings.Join(c, " "), status)
 	}
+}
+
+func runVersion() {
+	v, c, d := version, commit, date
+	modified := false
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			v = info.Main.Version
+		}
+		for _, s := range info.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				if c == "" {
+					c = s.Value
+					if len(c) > 12 {
+						c = c[:12]
+					}
+				}
+			case "vcs.time":
+				if d == "" {
+					d = s.Value
+				}
+			case "vcs.modified":
+				modified = s.Value == "true"
+			}
+		}
+	}
+	fmt.Printf("kk %s\n", v)
+	if c != "" {
+		dirty := ""
+		if modified {
+			dirty = " (dirty)"
+		}
+		fmt.Printf("  commit: %s%s\n", c, dirty)
+	}
+	if d != "" {
+		fmt.Printf("  built:  %s\n", d)
+	}
+	fmt.Printf("  go:     %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
 func splitCSV(s string) []string {
