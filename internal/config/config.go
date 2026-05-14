@@ -14,10 +14,26 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Mode controls which snapshots get persisted.
+type Mode string
+
+const (
+	// ModeFull persists every captured snapshot. The default.
+	ModeFull Mode = "full"
+	// ModeIncidentsOnly persists only snapshots that contain at least one
+	// unhealthy pod, along with the snapshot immediately before and after
+	// each such snapshot. Equivalent to running `kk shrink` continuously
+	// while recording.
+	ModeIncidentsOnly Mode = "incidents-only"
+)
+
 // Config controls what KronoKube captures and how.
 type Config struct {
 	// Interval between snapshots. Default 30s.
 	Interval time.Duration `yaml:"interval"`
+
+	// Mode selects the persistence policy. Default ModeFull.
+	Mode Mode `yaml:"mode"`
 
 	// Namespaces to include. Empty = all accessible namespaces.
 	IncludeNamespaces []string `yaml:"include_namespaces"`
@@ -58,6 +74,7 @@ type PodLogsConfig struct {
 func Default() Config {
 	return Config{
 		Interval: 30 * time.Second,
+		Mode:     ModeFull,
 		PodLogs: PodLogsConfig{
 			Enabled:       false,
 			TailLines:     100,
@@ -85,6 +102,14 @@ func Load(path string) (Config, error) {
 	}
 	if c.Interval <= 0 {
 		c.Interval = 30 * time.Second
+	}
+	switch c.Mode {
+	case "", ModeFull:
+		c.Mode = ModeFull
+	case ModeIncidentsOnly:
+		// ok
+	default:
+		return c, fmt.Errorf("unknown mode %q (want %q or %q)", c.Mode, ModeFull, ModeIncidentsOnly)
 	}
 	if c.PodLogs.TailLines <= 0 {
 		c.PodLogs.TailLines = 100

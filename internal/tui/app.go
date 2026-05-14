@@ -505,12 +505,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.refreshRowsCmd()
 
 	case captureTickMsg:
-		// New snapshot recorded. Reload list, then keep listening.
+		// New snapshot recorded (or, in incidents-only mode, dropped).
+		// Reload the snapshot list either way so persisted ones appear and
+		// keep listening for the next tick.
 		cmds := []tea.Cmd{
 			refreshSnapshotsCmd(m.store),
 			waitForTickCmd(m.progress),
 		}
-		// Flash a small notice
 		st := msg.tick.Stats
 		ok := 0
 		bad := 0
@@ -521,7 +522,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				bad++
 			}
 		}
-		m.statusFlash = fmt.Sprintf("snap %d • %d kinds ok, %d issues", msg.tick.SnapshotID, ok, bad)
+		extra := ""
+		switch {
+		case msg.tick.HasIncident:
+			extra = " • incident"
+		case msg.tick.PodsShrunk > 0:
+			extra = fmt.Sprintf(" • shrunk %d pods", msg.tick.PodsShrunk)
+		}
+		m.statusFlash = fmt.Sprintf("snap %d • %d kinds ok, %d issues%s", msg.tick.SnapshotID, ok, bad, extra)
 		m.flashUntil = time.Now().Add(3 * time.Second)
 		return m, tea.Batch(cmds...)
 

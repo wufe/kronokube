@@ -47,6 +47,8 @@ const usage = `kk — KronoKube, a read-only Kubernetes time machine
 
 Commands:
   record    Capture snapshots of a cluster into a .kk file (TUI live mode)
+            Add --incidents-only to keep only snapshots in the ±1 window
+            around a pod incident.
   replay    Open an existing .kk file and scrub through its history
   shrink    Strip non-essential data (logs / describe / yaml) from healthy pods
   safety    Print the kubectl allowlist (audit aid)
@@ -92,6 +94,7 @@ func runRecord(args []string) {
 	logsOn := fs.Bool("logs", false, "capture a tail of pod logs each snapshot (overrides config)")
 	logsTail := fs.Int("logs-tail", 100, "per-container tail when --logs is set")
 	logsTimeout := fs.Duration("logs-timeout", 5*time.Second, "per-pod timeout for log fetch when --logs is set")
+	incidentsOnly := fs.Bool("incidents-only", false, "only persist snapshots in the ±1 window around a pod incident (same retention as `kk shrink`)")
 	_ = fs.Parse(args)
 
 	// Track which flags were explicitly provided so we only override the
@@ -127,6 +130,9 @@ func runRecord(args []string) {
 	}
 	if setFlags["logs-timeout"] {
 		cfg.PodLogs.PerPodTimeout = *logsTimeout
+	}
+	if *incidentsOnly {
+		cfg.Mode = config.ModeIncidentsOnly
 	}
 
 	runner := kubectl.NewRunner("", cfg.Context, cfg.Kubeconfig)
@@ -168,7 +174,7 @@ func runRecord(args []string) {
 	captureErr := make(chan error, 1)
 	go func() { captureErr <- snap.Run(ctx) }()
 
-	fmt.Fprintf(os.Stderr, "kk: recording to %s (interval %s, context %q)\n", *out, cfg.Interval, cfg.Context)
+	fmt.Fprintf(os.Stderr, "kk: recording to %s (interval %s, context %q, mode %s)\n", *out, cfg.Interval, cfg.Context, cfg.Mode)
 
 	if *headless {
 		// Print one progress line per tick. The recorder owns its own lifecycle.
@@ -352,8 +358,15 @@ func printTick(t capture.Tick) {
 			er++
 		}
 	}
-	fmt.Fprintf(os.Stderr, "[%s] snap %d  ok=%d forbidden=%d skipped=%d error=%d\n",
-		t.Timestamp.Format(time.RFC3339), t.SnapshotID, ok, fb, sk, er)
+	disposition := fmt.Sprintf("snap %d", t.SnapshotID)
+	switch {
+	case t.HasIncident:
+		disposition += " (incident)"
+	case t.PodsShrunk > 0:
+		disposition += fmt.Sprintf(" (shrunk %d pods)", t.PodsShrunk)
+	}
+	fmt.Fprintf(os.Stderr, "[%s] %s  ok=%d forbidden=%d skipped=%d error=%d\n",
+		t.Timestamp.Format(time.RFC3339), disposition, ok, fb, sk, er)
 }
 
 func die(err error) {

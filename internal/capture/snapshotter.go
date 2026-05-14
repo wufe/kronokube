@@ -32,6 +32,35 @@ type Tick struct {
 	Timestamp  time.Time
 	Stats      map[model.Kind]KindStat
 	Err        error // overall snapshot-level error, if any
+	// Persisted is true when the snapshot's data was written to disk.
+	// Currently always true (both modes always write); preserved for
+	// callers that want a single field to gate UI updates on.
+	Persisted bool
+	// HasIncident reports whether the captured snapshot itself contained
+	// at least one unhealthy pod.
+	HasIncident bool
+	// PodsShrunk is the number of pod rows whose blob was replaced by the
+	// shared empty placeholder for this snapshot — only ever non-zero in
+	// ModeIncidentsOnly. Useful to flash a "shrunk on the fly" indicator.
+	PodsShrunk int
+}
+
+// capturedSnap holds one snapshot's data in memory before it gets written.
+// Used by both modes — the full-mode loop writes immediately, the
+// incidents-only loop buffers one snap so per-pod retention can look back
+// AND forward by one tick.
+type capturedSnap struct {
+	ts         time.Time
+	rows       []model.Row
+	events     []model.Event
+	podLogs    []model.PodLog
+	kindStatus map[model.Kind]model.KindStatus
+	kindErrs   map[model.Kind]string
+	stats      map[model.Kind]KindStat
+	// unhealthy is the set of pod identities (see podKey) classified as
+	// HealthSoftBad or HealthHardBad in this snapshot. len(unhealthy) > 0
+	// is the snapshot-level "has incident" predicate.
+	unhealthy map[string]bool
 }
 
 // KindStat is a per-kind capture outcome.
@@ -54,14 +83,22 @@ func New(cfg config.Config, runner *kubectl.Runner, s *store.Store) *Snapshotter
 // Progress returns a channel of per-snapshot progress updates.
 func (s *Snapshotter) Progress() <-chan Tick { return s.progressCh }
 
-// Run blocks, capturing snapshots until ctx is cancelled. It calls CaptureOnce
-// immediately, then once per cfg.Interval.
+// Run blocks, capturing snapshots until ctx is cancelled. Dispatches on
+// cfg.Mode: ModeFull writes every snapshot; ModeIncidentsOnly buffers one
+// snapshot at a time and only persists the (pod-incident ±1) window.
 func (s *Snapshotter) Run(ctx context.Context) error {
 	// Best-effort: record cluster identity at startup.
 	cn, _ := s.runner.CurrentContext(ctx)
 	sv := s.runner.ServerVersion(ctx)
 	_ = s.store.SetClusterInfo(cn, sv)
 
+	if s.cfg.Mode == config.ModeIncidentsOnly {
+		return s.runIncidentsOnly(ctx)
+	}
+	return s.runFull(ctx)
+}
+
+func (s *Snapshotter) runFull(ctx context.Context) error {
 	t := s.CaptureOnce(ctx)
 	s.publish(t)
 
@@ -78,6 +115,121 @@ func (s *Snapshotter) Run(ctx context.Context) error {
 	}
 }
 
+// runIncidentsOnly buffers one snapshot at a time so per-pod retention
+// can look back AND forward by one tick — same window `kk shrink`
+// produces post-hoc, but applied inline at record time.
+//
+// Every snapshot is still written; only the per-pod blob and log are
+// stripped when (pod, snapshot) falls outside that pod's incident±1
+// window. The snapshot row, the resource row's cells_json, events, and
+// non-pod resources are kept as-is so the timeline stays continuous and
+// the tabular view always shows what was there.
+//
+// keptSentinel tracks which pods we've already written at least one full
+// blob for. It implements shrink's "always keep one blob per pod" rule:
+// without it, an always-healthy pod would lose every blob to the empty
+// placeholder and the drill-down's ownerReferences fallback would have
+// nothing to fall back to.
+func (s *Snapshotter) runIncidentsOnly(ctx context.Context) error {
+	var pending *capturedSnap
+	var prevUnhealthy map[string]bool // per-pod unhealthy in the snap before pending
+	keptSentinel := map[string]bool{}
+
+	flush := func(nextUnhealthy map[string]bool) {
+		if pending == nil {
+			return
+		}
+		shrunk := shrinkInPlace(pending, prevUnhealthy, nextUnhealthy, keptSentinel)
+		id, err := s.store.WriteSnapshot(pending.ts, pending.rows, pending.events, pending.podLogs, pending.kindStatus, pending.kindErrs)
+		s.publish(Tick{
+			SnapshotID:  id,
+			Timestamp:   pending.ts,
+			Stats:       pending.stats,
+			Err:         err,
+			Persisted:   err == nil && id != 0,
+			HasIncident: len(pending.unhealthy) > 0,
+			PodsShrunk:  shrunk,
+		})
+		prevUnhealthy = pending.unhealthy
+	}
+
+	step := func() {
+		cur := s.captureRaw(ctx)
+		flush(cur.unhealthy)
+		pending = &cur
+	}
+
+	step()
+
+	ticker := time.NewTicker(s.cfg.Interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			// No "next" to look at — pass nil so the future side of the
+			// window contributes nothing. prev || self still applies.
+			flush(nil)
+			return ctx.Err()
+		case <-ticker.C:
+			step()
+		}
+	}
+}
+
+// shrinkInPlace mutates a captured snapshot's pod rows so that any pod
+// outside its incident±1 window has Shrunk=true (Store.WriteSnapshot
+// turns those into empty-blob references with shrunk=1) and its log
+// dropped from podLogs. Returns the number of rows shrunk.
+//
+// prev / next are per-pod "was unhealthy" maps for the surrounding ticks
+// (either may be nil). keptSentinel is mutated so each pod's first kept
+// blob marks it as "sentinel satisfied" — subsequent healthy snapshots
+// for the same pod can then be safely shrunk.
+func shrinkInPlace(c *capturedSnap, prev, next map[string]bool, keptSentinel map[string]bool) int {
+	keepLog := map[string]bool{}
+	shrunk := 0
+	for i, r := range c.rows {
+		if r.Kind != "pods" {
+			continue
+		}
+		key := podKey(r)
+		keep := prev[key] || c.unhealthy[key] || next[key]
+		// Sentinel rule: until a pod has at least one full blob on disk,
+		// keep the next observation we'd otherwise shrink. Matches what
+		// `kk shrink` does for pods that are always healthy.
+		if !keep && !keptSentinel[key] {
+			keep = true
+		}
+		if keep {
+			keptSentinel[key] = true
+			keepLog[r.Namespace+"/"+r.Name] = true
+			continue
+		}
+		c.rows[i].Shrunk = true
+		shrunk++
+	}
+	if len(c.podLogs) > 0 {
+		filtered := c.podLogs[:0]
+		for _, pl := range c.podLogs {
+			if keepLog[pl.Namespace+"/"+pl.Pod] {
+				filtered = append(filtered, pl)
+			}
+		}
+		c.podLogs = filtered
+	}
+	return shrunk
+}
+
+// podKey is the identity we use to track a pod across snapshots. UID is
+// the right answer when it's set; namespace/name is a fallback for
+// degenerate captures where UID didn't make it into the row.
+func podKey(r model.Row) string {
+	if r.UID != "" {
+		return r.UID
+	}
+	return r.Namespace + "/" + r.Name
+}
+
 func (s *Snapshotter) publish(t Tick) {
 	select {
 	case s.progressCh <- t:
@@ -86,10 +238,26 @@ func (s *Snapshotter) publish(t Tick) {
 	}
 }
 
-// CaptureOnce runs one full snapshot pass: fan out kubectl gets across the
-// catalog, tabulate, write. Failures for individual kinds are recorded as
-// per-kind status rather than aborting the snapshot.
+// CaptureOnce runs one full snapshot pass and writes it. Used by the
+// full-mode loop. Failures for individual kinds are recorded as per-kind
+// status rather than aborting the snapshot.
 func (s *Snapshotter) CaptureOnce(ctx context.Context) Tick {
+	c := s.captureRaw(ctx)
+	id, werr := s.store.WriteSnapshot(c.ts, c.rows, c.events, c.podLogs, c.kindStatus, c.kindErrs)
+	return Tick{
+		SnapshotID:  id,
+		Timestamp:   c.ts,
+		Stats:       c.stats,
+		Err:         werr,
+		Persisted:   werr == nil && id != 0,
+		HasIncident: len(c.unhealthy) > 0,
+	}
+}
+
+// captureRaw runs one capture pass and returns the data in memory, without
+// touching the store. Used by both CaptureOnce (which persists immediately)
+// and the incidents-only loop (which defers the decision by one tick).
+func (s *Snapshotter) captureRaw(ctx context.Context) capturedSnap {
 	ts := time.Now()
 	stats := make(map[model.Kind]KindStat, len(model.Catalog))
 	statuses := make(map[model.Kind]model.KindStatus, len(model.Catalog))
@@ -157,8 +325,39 @@ func (s *Snapshotter) CaptureOnce(ctx context.Context) Tick {
 		podLogs = s.capturePodLogs(ctx, allRows)
 	}
 
-	id, werr := s.store.WriteSnapshot(ts, allRows, allEvents, podLogs, statuses, errMsgs)
-	return Tick{SnapshotID: id, Timestamp: ts, Stats: stats, Err: werr}
+	return capturedSnap{
+		ts:         ts,
+		rows:       allRows,
+		events:     allEvents,
+		podLogs:    podLogs,
+		kindStatus: statuses,
+		kindErrs:   errMsgs,
+		stats:      stats,
+		unhealthy:  perPodUnhealthy(allRows),
+	}
+}
+
+// perPodUnhealthy returns the set of pod identities (podKey) classified
+// as HealthSoftBad or HealthHardBad. Matches the per-(pod, snapshot)
+// definition `kk shrink` uses; populated once per tick so the
+// incidents-only loop can decide retention per pod, not per snapshot.
+//
+// Pod cell layout — see model.defPods: [NAMESPACE, NAME, READY, STATUS, …].
+func perPodUnhealthy(rows []model.Row) map[string]bool {
+	out := map[string]bool{}
+	for _, r := range rows {
+		if r.Kind != "pods" {
+			continue
+		}
+		if len(r.Cells) < 4 {
+			continue
+		}
+		ready, status := r.Cells[2], r.Cells[3]
+		if model.ClassifyPodHealth(status, ready) != model.HealthHealthy {
+			out[podKey(r)] = true
+		}
+	}
+	return out
 }
 
 // capturePodLogs fan-outs `kubectl logs --tail` for every captured pod.

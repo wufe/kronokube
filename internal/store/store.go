@@ -136,15 +136,32 @@ func (s *Store) WriteSnapshot(ts time.Time, rows []model.Row, events []model.Eve
 	// Cache hash->id within the transaction to avoid repeated SELECTs for
 	// already-inserted blobs in this tick.
 	blobIDCache := make(map[string]int64, len(rows))
+	// Lazily initialized when the first Row.Shrunk arrives. Lets the live
+	// `--incidents-only` recorder strip blobs in-flight with the same
+	// retention shape that `kk shrink` produces post-hoc.
+	var emptyBlobID int64
 
 	for _, r := range rows {
-		blobID, err := s.upsertBlob(tx, r.RawJSON, blobIDCache)
-		if err != nil {
-			return 0, err
+		var blobID int64
+		shrunkFlag := 0
+		if r.Shrunk {
+			if emptyBlobID == 0 {
+				emptyBlobID, err = upsertEmptyBlob(tx)
+				if err != nil {
+					return 0, err
+				}
+			}
+			blobID = emptyBlobID
+			shrunkFlag = 1
+		} else {
+			blobID, err = s.upsertBlob(tx, r.RawJSON, blobIDCache)
+			if err != nil {
+				return 0, err
+			}
 		}
 		cellsJSON, _ := json.Marshal(r.Cells)
-		if _, err := tx.Exec(`INSERT INTO resources(snapshot_id,kind,namespace,name,uid,cells_json,blob_id) VALUES(?,?,?,?,?,?,?)`,
-			snapID, string(r.Kind), r.Namespace, r.Name, r.UID, string(cellsJSON), blobID); err != nil {
+		if _, err := tx.Exec(`INSERT INTO resources(snapshot_id,kind,namespace,name,uid,cells_json,blob_id,shrunk) VALUES(?,?,?,?,?,?,?,?)`,
+			snapID, string(r.Kind), r.Namespace, r.Name, r.UID, string(cellsJSON), blobID, shrunkFlag); err != nil {
 			return 0, fmt.Errorf("insert resource %s/%s: %w", r.Namespace, r.Name, err)
 		}
 	}
