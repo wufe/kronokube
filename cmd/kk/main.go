@@ -2,7 +2,7 @@
 // into a single seekable .kk file and replays them with a TUI.
 //
 // USAGE
-//   kk record [--out file.kk] [--interval 30s] [--config kk.yaml] [--namespace ns ...]
+//   kk record [--out file.kk] [--interval 30s] [--namespace ns ...]
 //   kk replay <file.kk>
 //   kk safety        — print the kubectl allowlist for audit
 //
@@ -85,10 +85,9 @@ func main() {
 func runRecord(args []string) {
 	fs := flag.NewFlagSet("record", flag.ExitOnError)
 	out := fs.String("out", "", "output .kk file (default: kk-<context>-<date>.kk)")
-	cfgPath := fs.String("config", "", "YAML config file (optional)")
-	interval := fs.Duration("interval", 0, "snapshot interval (overrides config; default 30s)")
-	contextName := fs.String("context", "", "kubeconfig context (overrides config; default current-context)")
-	kubeconfig := fs.String("kubeconfig", "", "path to kubeconfig (overrides config / $KUBECONFIG)")
+	interval := fs.Duration("interval", 0, "snapshot interval (default 30s)")
+	contextName := fs.String("context", "", "kubeconfig context (default: current-context)")
+	kubeconfig := fs.String("kubeconfig", "", "path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)")
 	includeNS := fs.String("namespace", "", "comma-separated namespaces to include (default: all)")
 	fs.StringVar(includeNS, "n", "", "shorthand for --namespace")
 	excludeNS := fs.String("exclude-namespace", "", "comma-separated namespaces to skip")
@@ -97,7 +96,7 @@ func runRecord(args []string) {
 	selector := fs.String("selector", "", "label selector passed as -l to every kubectl get")
 	fs.StringVar(selector, "l", "", "shorthand for --selector")
 	headless := fs.Bool("no-tui", false, "record without a TUI (useful for daemons / cron)")
-	logsOn := fs.Bool("logs", false, "capture a tail of pod logs each snapshot (overrides config)")
+	logsOn := fs.Bool("logs", false, "capture a tail of pod logs each snapshot")
 	logsTail := fs.Int("logs-tail", 100, "per-container tail when --logs is set")
 	logsTimeout := fs.Duration("logs-timeout", 5*time.Second, "per-pod timeout for log fetch when --logs is set")
 	incidentsOnly := fs.Bool("incidents-only", false, "only persist snapshots in the ±1 window around a pod incident (same retention as `kk shrink`)")
@@ -108,11 +107,7 @@ func runRecord(args []string) {
 	setFlags := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 
-	cfg, err := config.Load(*cfgPath)
-	if err != nil {
-		die(err)
-	}
-	// CLI flags override config.
+	cfg := config.Default()
 	if *interval > 0 {
 		cfg.Interval = *interval
 	}
@@ -166,9 +161,6 @@ func runRecord(args []string) {
 		cfg.Context = resolvedCtx
 	}
 
-	if *out == "" && cfg.Output != "" {
-		*out = cfg.Output
-	}
 	if *out == "" {
 		*out = defaultOutFile(cfg.Context)
 	}

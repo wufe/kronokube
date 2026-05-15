@@ -78,13 +78,14 @@ Common flags:
 | `--logs` | Capture a tail of pod logs each snapshot (default 100 lines, 5s timeout) |
 | `--logs-tail N` | Per-container tail when `--logs` is on |
 | `--logs-timeout D` | Per-pod log-fetch timeout |
-| `--config FILE` | YAML config file (see `examples/config.yaml`) |
+
+KronoKube is configured entirely through CLI flags — there is no config file.
 
 ### Filtering what gets captured
 
 In large production clusters the default capture can take too long because a
 handful of high-cardinality kinds dominate the work. Three flags scope it
-down — all driven from the command line, no config file required.
+down.
 
 `--kinds` accepts a preset name or an explicit comma-separated list. Short
 names (`deployments` for `deployments.apps`) are accepted. Presets:
@@ -164,8 +165,8 @@ stays so the resource keeps appearing in tables, just greyed-out; `d`,
 Non-pod resources are left untouched. SQLite is `VACUUM`ed at the end so
 the freed space is returned to the filesystem.
 
-- **Pod logs** — off by default. Enable with `pod_logs.enabled: true` in
-  config (see `examples/config.yaml`); KronoKube then fetches a per-container
+- **Pod logs** — off by default. Enable with `--logs` (optionally
+  `--logs-tail N`, `--logs-timeout D`); KronoKube then fetches a per-container
   tail (default 100 lines) for every captured pod, using
   `kubectl logs --all-containers --prefix --tail=N`. The snapshotter never
   uses `-f`/`--follow` (the standard allowlist still rejects it) so a stuck
@@ -208,5 +209,5 @@ You can inspect a `.kk` file with `sqlite3` if you want to query directly.
     internal/model/         Resource catalog + column extractors (k9s-style)
     internal/capture/       Snapshotter (ticker loop) + JSON tabulator
     internal/store/         SQLite schema / writer / reader
-    internal/config/        YAML config loader
+    internal/config/        In-memory config struct + defaults
     internal/tui/           Bubble Tea TUI: table, timeline, describe, events

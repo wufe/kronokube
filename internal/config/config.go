@@ -1,17 +1,12 @@
-// Package config loads KronoKube's optional YAML configuration.
-//
-// All settings can also be overridden by CLI flags; the YAML file just makes
-// it convenient to keep them in version control next to the project being
-// debugged.
+// Package config holds KronoKube's in-memory configuration. There is no
+// config file — every setting comes from CLI flags (cmd/kk). This package
+// just defines the struct shape, sensible defaults, and a couple of pure
+// helpers (namespace inclusion, mode enum).
 package config
 
 import (
-	"fmt"
-	"os"
 	"slices"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Mode controls which snapshots get persisted.
@@ -27,47 +22,45 @@ const (
 	ModeIncidentsOnly Mode = "incidents-only"
 )
 
-// Config controls what KronoKube captures and how.
+// Config controls what KronoKube captures and how. All fields are populated
+// from CLI flags in cmd/kk/main.go; nothing reads or writes a file.
 type Config struct {
 	// Interval between snapshots. Default 30s.
-	Interval time.Duration `yaml:"interval"`
+	Interval time.Duration
 
 	// Mode selects the persistence policy. Default ModeFull.
-	Mode Mode `yaml:"mode"`
+	Mode Mode
 
 	// Namespaces to include. Empty = all accessible namespaces.
-	IncludeNamespaces []string `yaml:"include_namespaces"`
+	IncludeNamespaces []string
 
 	// Namespaces to skip. Applied after IncludeNamespaces.
-	ExcludeNamespaces []string `yaml:"exclude_namespaces"`
+	ExcludeNamespaces []string
 
 	// Kinds is a preset name ("minimal", "default", "workloads", "full") or a
 	// comma-separated list of resource kinds (e.g. "pods,services"). Short
 	// forms ("deployments" for "deployments.apps") are accepted. Empty means
 	// "default".
-	Kinds string `yaml:"kinds"`
+	Kinds string
 
 	// ExcludeKinds drops kinds from the resolved Kinds set. Same accepted
 	// names as Kinds (catalog name or short prefix).
-	ExcludeKinds []string `yaml:"exclude_kinds"`
+	ExcludeKinds []string
 
 	// Selector is a label selector passed as `-l` to every `kubectl get`.
 	// Empty means no selector. Applied uniformly across all captured kinds.
-	Selector string `yaml:"selector"`
-
-	// Output is the path of the .kk file to write to. May be overridden by --out.
-	Output string `yaml:"output"`
+	Selector string
 
 	// Context is the kubeconfig context to bind to. Empty = current-context.
-	Context string `yaml:"context"`
+	Context string
 
 	// Kubeconfig path (empty = default ~/.kube/config or $KUBECONFIG).
-	Kubeconfig string `yaml:"kubeconfig"`
+	Kubeconfig string
 
 	// PodLogs controls capture of a tail of recent log output for every pod
 	// in scope. Disabled by default — logs can contain sensitive data and
 	// they multiply the kubectl traffic per snapshot.
-	PodLogs PodLogsConfig `yaml:"pod_logs"`
+	PodLogs PodLogsConfig
 }
 
 // PodLogsConfig is the toggle for pod log capture.
@@ -75,13 +68,13 @@ type PodLogsConfig struct {
 	// Enabled turns log capture on. When true, every captured pod gets a
 	// `kubectl logs --all-containers --prefix --tail=<TailLines>` fetched
 	// after the main snapshot pass.
-	Enabled bool `yaml:"enabled"`
+	Enabled bool
 	// TailLines is the per-container tail to fetch. Default 100. The actual
 	// per-pod byte size scales with container count.
-	TailLines int `yaml:"tail_lines"`
+	TailLines int
 	// PerPodTimeout bounds a single `kubectl logs` call so a slow pod can't
 	// stall the whole snapshot. Default 5s.
-	PerPodTimeout time.Duration `yaml:"per_pod_timeout"`
+	PerPodTimeout time.Duration
 }
 
 // Default returns Config with sensible defaults applied.
@@ -96,46 +89,6 @@ func Default() Config {
 			PerPodTimeout: 5 * time.Second,
 		},
 	}
-}
-
-// Load reads a YAML config file. Missing file is not an error — defaults are
-// returned. The caller is responsible for layering CLI flags on top.
-func Load(path string) (Config, error) {
-	c := Default()
-	if path == "" {
-		return c, nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return c, nil
-		}
-		return c, fmt.Errorf("read config %q: %w", path, err)
-	}
-	if err := yaml.Unmarshal(data, &c); err != nil {
-		return c, fmt.Errorf("parse config: %w", err)
-	}
-	if c.Interval <= 0 {
-		c.Interval = 30 * time.Second
-	}
-	switch c.Mode {
-	case "", ModeFull:
-		c.Mode = ModeFull
-	case ModeIncidentsOnly:
-		// ok
-	default:
-		return c, fmt.Errorf("unknown mode %q (want %q or %q)", c.Mode, ModeFull, ModeIncidentsOnly)
-	}
-	if c.Kinds == "" {
-		c.Kinds = "default"
-	}
-	if c.PodLogs.TailLines <= 0 {
-		c.PodLogs.TailLines = 100
-	}
-	if c.PodLogs.PerPodTimeout <= 0 {
-		c.PodLogs.PerPodTimeout = 5 * time.Second
-	}
-	return c, nil
 }
 
 // IsNamespaceCaptured reports whether a namespace passes include/exclude rules.
