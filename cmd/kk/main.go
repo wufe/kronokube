@@ -166,11 +166,11 @@ func runRecord(args []string) {
 		cfg.Context = resolvedCtx
 	}
 
+	if *out == "" && cfg.Output != "" {
+		*out = cfg.Output
+	}
 	if *out == "" {
 		*out = defaultOutFile(cfg.Context)
-	}
-	if cfg.Output != "" && *out == "" {
-		*out = cfg.Output
 	}
 
 	st, err := store.Open(*out)
