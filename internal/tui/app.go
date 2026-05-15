@@ -1715,7 +1715,7 @@ func max0(n int) int {
 // mode; it is required for the live-log-stream behavior in record mode.
 func Run(ctx context.Context, st *store.Store, live bool, progress <-chan capture.Tick, runner *kubectl.Runner, cancel context.CancelFunc) error {
 	m := NewModel(st, live, progress, runner, cancel)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	if errors.Is(err, tea.ErrProgramKilled) {
 		return nil
