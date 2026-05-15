@@ -90,6 +90,7 @@ func runRecord(args []string) {
 	contextName := fs.String("context", "", "kubeconfig context (overrides config; default current-context)")
 	kubeconfig := fs.String("kubeconfig", "", "path to kubeconfig (overrides config / $KUBECONFIG)")
 	includeNS := fs.String("namespace", "", "comma-separated namespaces to include (default: all)")
+	fs.StringVar(includeNS, "n", "", "shorthand for --namespace")
 	excludeNS := fs.String("exclude-namespace", "", "comma-separated namespaces to skip")
 	kindsSpec := fs.String("kinds", "", "preset (minimal|default|workloads|full) or comma-separated kinds (default: default)")
 	excludeKinds := fs.String("exclude-kinds", "", "comma-separated kinds to drop from the resolved set")
