@@ -27,6 +27,10 @@ type Runner struct {
 	binary string
 	// extraArgs is prepended to every invocation (e.g. --context, --kubeconfig).
 	extraArgs []string
+	// listSelector is a label selector appended as `-l <selector>` to every
+	// ListResourceJSON call. Empty = no selector. Only list operations get it;
+	// describe and logs are addressed by name and ignore it.
+	listSelector string
 }
 
 // NewRunner builds a Runner. binary may be "" to use "kubectl" from PATH.
@@ -44,6 +48,11 @@ func NewRunner(binary, contextName, kubeconfig string) *Runner {
 	}
 	return &Runner{binary: binary, extraArgs: extra}
 }
+
+// SetListSelector configures a label selector appended to every list call
+// (kubectl get -l <selector>). Pass "" to clear. Has no effect on describe,
+// logs, or any other non-list operation.
+func (r *Runner) SetListSelector(s string) { r.listSelector = s }
 
 // Exec validates argv against the allowlist and, if it passes, runs kubectl.
 // Returns stdout. stderr is included in the returned error on non-zero exit.
@@ -174,12 +183,16 @@ func (r *Runner) ServerVersion(ctx context.Context) string {
 
 // ListResourceJSON runs `kubectl get <kind> -A -o=json` (or scoped to a namespace).
 // kind is e.g. "pods", "deployments.apps", "events". namespace "" means all namespaces.
+// If a list selector has been set via SetListSelector, it is appended as `-l`.
 func (r *Runner) ListResourceJSON(ctx context.Context, kind, namespace string) ([]byte, error) {
 	args := []string{"get", kind, "-o=json", "--ignore-not-found=true"}
 	if namespace == "" {
 		args = append(args, "-A")
 	} else {
 		args = append(args, "-n", namespace)
+	}
+	if r.listSelector != "" {
+		args = append(args, "-l", r.listSelector)
 	}
 	return r.Exec(ctx, args)
 }

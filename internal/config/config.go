@@ -41,6 +41,20 @@ type Config struct {
 	// Namespaces to skip. Applied after IncludeNamespaces.
 	ExcludeNamespaces []string `yaml:"exclude_namespaces"`
 
+	// Kinds is a preset name ("minimal", "default", "workloads", "full") or a
+	// comma-separated list of resource kinds (e.g. "pods,services"). Short
+	// forms ("deployments" for "deployments.apps") are accepted. Empty means
+	// "default".
+	Kinds string `yaml:"kinds"`
+
+	// ExcludeKinds drops kinds from the resolved Kinds set. Same accepted
+	// names as Kinds (catalog name or short prefix).
+	ExcludeKinds []string `yaml:"exclude_kinds"`
+
+	// Selector is a label selector passed as `-l` to every `kubectl get`.
+	// Empty means no selector. Applied uniformly across all captured kinds.
+	Selector string `yaml:"selector"`
+
 	// Output is the path of the .kk file to write to. May be overridden by --out.
 	Output string `yaml:"output"`
 
@@ -75,6 +89,7 @@ func Default() Config {
 	return Config{
 		Interval: 30 * time.Second,
 		Mode:     ModeFull,
+		Kinds:    "default",
 		PodLogs: PodLogsConfig{
 			Enabled:       false,
 			TailLines:     100,
@@ -110,6 +125,9 @@ func Load(path string) (Config, error) {
 		// ok
 	default:
 		return c, fmt.Errorf("unknown mode %q (want %q or %q)", c.Mode, ModeFull, ModeIncidentsOnly)
+	}
+	if c.Kinds == "" {
+		c.Kinds = "default"
 	}
 	if c.PodLogs.TailLines <= 0 {
 		c.PodLogs.TailLines = 100

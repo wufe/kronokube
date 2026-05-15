@@ -27,6 +27,7 @@ import (
 	"github.com/wufe/kronokube/internal/capture"
 	"github.com/wufe/kronokube/internal/config"
 	"github.com/wufe/kronokube/internal/kubectl"
+	"github.com/wufe/kronokube/internal/model"
 	"github.com/wufe/kronokube/internal/store"
 	"github.com/wufe/kronokube/internal/tui"
 )
@@ -90,6 +91,10 @@ func runRecord(args []string) {
 	kubeconfig := fs.String("kubeconfig", "", "path to kubeconfig (overrides config / $KUBECONFIG)")
 	includeNS := fs.String("namespace", "", "comma-separated namespaces to include (default: all)")
 	excludeNS := fs.String("exclude-namespace", "", "comma-separated namespaces to skip")
+	kindsSpec := fs.String("kinds", "", "preset (minimal|default|workloads|full) or comma-separated kinds (default: default)")
+	excludeKinds := fs.String("exclude-kinds", "", "comma-separated kinds to drop from the resolved set")
+	selector := fs.String("selector", "", "label selector passed as -l to every kubectl get")
+	fs.StringVar(selector, "l", "", "shorthand for --selector")
 	headless := fs.Bool("no-tui", false, "record without a TUI (useful for daemons / cron)")
 	logsOn := fs.Bool("logs", false, "capture a tail of pod logs each snapshot (overrides config)")
 	logsTail := fs.Int("logs-tail", 100, "per-container tail when --logs is set")
@@ -122,6 +127,22 @@ func runRecord(args []string) {
 	if *excludeNS != "" {
 		cfg.ExcludeNamespaces = splitCSV(*excludeNS)
 	}
+	if setFlags["kinds"] {
+		cfg.Kinds = *kindsSpec
+	}
+	if *excludeKinds != "" {
+		cfg.ExcludeKinds = splitCSV(*excludeKinds)
+	}
+	if *selector != "" {
+		cfg.Selector = *selector
+	}
+
+	// Resolve kinds eagerly so unknown names fail at flag-parse time, not
+	// halfway through a snapshot pass.
+	resolvedKinds, err := model.ResolveKinds(cfg.Kinds, cfg.ExcludeKinds)
+	if err != nil {
+		die(err)
+	}
 	if setFlags["logs"] {
 		cfg.PodLogs.Enabled = *logsOn
 	}
@@ -136,6 +157,7 @@ func runRecord(args []string) {
 	}
 
 	runner := kubectl.NewRunner("", cfg.Context, cfg.Kubeconfig)
+	runner.SetListSelector(cfg.Selector)
 
 	// Resolve actual context name (for default filename + meta).
 	resolvedCtx, _ := runner.CurrentContext(context.Background())
@@ -167,14 +189,19 @@ func runRecord(args []string) {
 		cancel()
 	}()
 
-	snap := capture.New(cfg, runner, st)
+	snap := capture.New(cfg, runner, st, resolvedKinds)
 	progressCh := snap.Progress()
 
 	// Start capture in background.
 	captureErr := make(chan error, 1)
 	go func() { captureErr <- snap.Run(ctx) }()
 
-	fmt.Fprintf(os.Stderr, "kk: recording to %s (interval %s, context %q, mode %s)\n", *out, cfg.Interval, cfg.Context, cfg.Mode)
+	selectorInfo := ""
+	if cfg.Selector != "" {
+		selectorInfo = fmt.Sprintf(", selector %q", cfg.Selector)
+	}
+	fmt.Fprintf(os.Stderr, "kk: recording to %s (interval %s, context %q, mode %s, %d kinds%s)\n",
+		*out, cfg.Interval, cfg.Context, cfg.Mode, len(resolvedKinds), selectorInfo)
 
 	if *headless {
 		// Print one progress line per tick. The recorder owns its own lifecycle.

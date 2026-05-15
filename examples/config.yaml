@@ -23,6 +23,25 @@ interval: 30s
 # exclude_namespaces:
 #   - kube-system
 
+# Which resource kinds to capture. Accepts a preset name OR a comma-separated
+# list. Presets:
+#   minimal    pods, deployments, statefulsets, services, events
+#   default    everything in the catalog except endpointslices and replicasets
+#              (the two kinds that scale fastest with cluster size)
+#   workloads  pods + the pod-producing controllers
+#   full       every kind in the catalog
+# Short names ("deployments" for "deployments.apps") are accepted.
+# kinds: default
+
+# Drop kinds from the resolved set above. Applied after `kinds`.
+# exclude_kinds:
+#   - events
+#   - endpointslices
+
+# Label selector passed as `-l` to every `kubectl get`. Applied uniformly
+# across all captured kinds. Empty = no selector.
+# selector: app=api,tier!=batch
+
 # Pod log capture. OFF by default — logs can be large and may contain
 # sensitive data. When enabled, KronoKube runs
 #   kubectl logs <pod> -n <ns> --all-containers=true --prefix=true --tail=N

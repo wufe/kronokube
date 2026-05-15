@@ -20,6 +20,12 @@ type Snapshotter struct {
 	runner *kubectl.Runner
 	store  *store.Store
 
+	// kinds is the ordered list of resource kinds to capture each tick. It's
+	// the resolved output of model.ResolveKinds applied to cfg.Kinds /
+	// cfg.ExcludeKinds. Catalog entries whose Kind isn't in this set are
+	// skipped entirely.
+	kinds []model.ResourceDef
+
 	// progressCh receives one Tick per successful (or failed) snapshot. The
 	// TUI subscribes to draw the live status. It's a small buffered channel;
 	// drop on overflow to avoid blocking the capture loop.
@@ -71,13 +77,38 @@ type KindStat struct {
 }
 
 // New constructs a Snapshotter. The store and runner must already be ready.
-func New(cfg config.Config, runner *kubectl.Runner, s *store.Store) *Snapshotter {
+// kinds is the resolved set of resource kinds to capture each tick (see
+// model.ResolveKinds). An empty slice falls back to the full catalog so
+// existing callers / tests keep working.
+func New(cfg config.Config, runner *kubectl.Runner, s *store.Store, kinds []model.Kind) *Snapshotter {
+	defs := selectCatalog(kinds)
 	return &Snapshotter{
 		cfg:        cfg,
 		runner:     runner,
 		store:      s,
+		kinds:      defs,
 		progressCh: make(chan Tick, 8),
 	}
+}
+
+// selectCatalog returns the ResourceDef entries for the given Kind set, in
+// catalog order. If kinds is empty, the full catalog is returned (keeps the
+// no-filter path unchanged).
+func selectCatalog(kinds []model.Kind) []model.ResourceDef {
+	if len(kinds) == 0 {
+		return model.Catalog
+	}
+	want := make(map[model.Kind]bool, len(kinds))
+	for _, k := range kinds {
+		want[k] = true
+	}
+	out := make([]model.ResourceDef, 0, len(kinds))
+	for _, d := range model.Catalog {
+		if want[d.Kind] {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // Progress returns a channel of per-snapshot progress updates.
@@ -259,8 +290,8 @@ func (s *Snapshotter) CaptureOnce(ctx context.Context) Tick {
 // and the incidents-only loop (which defers the decision by one tick).
 func (s *Snapshotter) captureRaw(ctx context.Context) capturedSnap {
 	ts := time.Now()
-	stats := make(map[model.Kind]KindStat, len(model.Catalog))
-	statuses := make(map[model.Kind]model.KindStatus, len(model.Catalog))
+	stats := make(map[model.Kind]KindStat, len(s.kinds))
+	statuses := make(map[model.Kind]model.KindStatus, len(s.kinds))
 	errMsgs := make(map[model.Kind]string)
 
 	var allRows []model.Row
@@ -272,7 +303,7 @@ func (s *Snapshotter) captureRaw(ctx context.Context) capturedSnap {
 	const maxParallel = 4
 	sem := make(chan struct{}, maxParallel)
 
-	for _, def := range model.Catalog {
+	for _, def := range s.kinds {
 		wg.Add(1)
 		go func(d model.ResourceDef) {
 			defer wg.Done()

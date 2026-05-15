@@ -72,10 +72,41 @@ Common flags:
 | `--kubeconfig PATH` | kubeconfig path |
 | `--namespace ns1,ns2` | Only capture these namespaces |
 | `--exclude-namespace kube-system` | Skip these namespaces |
+| `--kinds NAME` | Preset or comma-separated kind list (default `default` — see below) |
+| `--exclude-kinds k1,k2` | Drop kinds from the resolved set |
+| `-l / --selector` | Label selector passed as `-l` to every `kubectl get` |
 | `--logs` | Capture a tail of pod logs each snapshot (default 100 lines, 5s timeout) |
 | `--logs-tail N` | Per-container tail when `--logs` is on |
 | `--logs-timeout D` | Per-pod log-fetch timeout |
 | `--config FILE` | YAML config file (see `examples/config.yaml`) |
+
+### Filtering what gets captured
+
+In large production clusters the default capture can take too long because a
+handful of high-cardinality kinds dominate the work. Three flags scope it
+down — all driven from the command line, no config file required.
+
+`--kinds` accepts a preset name or an explicit comma-separated list. Short
+names (`deployments` for `deployments.apps`) are accepted. Presets:
+
+| Preset | Contents |
+|---|---|
+| `minimal` | pods, deployments, statefulsets, services, events |
+| `default` (the default) | every kind in the catalog **except** `endpointslices` and `replicasets` — the two that scale fastest with cluster size |
+| `workloads` | pods + the pod-producing controllers (deployments, replicasets, statefulsets, daemonsets, jobs, cronjobs) |
+| `full` | every kind in the catalog |
+
+`--exclude-kinds` is applied after `--kinds`, so the common escape hatch on a
+huge cluster is just `--kinds full --exclude-kinds endpointslices,replicasets`
+(or stick with the default and add more to drop).
+
+`-l` / `--selector` is passed through to every `kubectl get` so the recording
+only sees objects whose labels match. Useful for "capture only my app":
+
+    kk record -l app=api,tier!=batch --kinds workloads,events
+
+Unknown kinds and unknown preset names fail at flag-parse time with the valid
+set listed in the error.
 
 ## TUI controls
 
